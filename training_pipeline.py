@@ -45,6 +45,7 @@ def main() -> None:
 
     host = os.getenv("HOPSWORKS_HOST", "eu-west.cloud.hopsworks.ai")
     api_key = os.getenv("HOPSWORKS_API_KEY")
+    horizon_hours = int(os.getenv("HORIZON_HOURS", "72"))
     if not api_key:
         raise RuntimeError("HOPSWORKS_API_KEY is missing")
 
@@ -57,7 +58,7 @@ def main() -> None:
     logging.info("Raw data columns: %s", raw.columns.tolist())
     logging.info("Raw data dtypes:\n%s", raw.dtypes)
 
-    train_df = build_training_frame(raw, horizon=72)
+    train_df = build_training_frame(raw, horizon=horizon_hours)
     logging.info("Training frame shape after build_training_frame: %s", train_df.shape)
 
     feature_cols = [
@@ -115,17 +116,31 @@ def main() -> None:
 
         joblib.dump(best_model, model_path)
         with open(metadata_path, "w", encoding="utf-8") as f:
-            json.dump({"model_name": best_name, "features": feature_cols, "metrics": best_metrics}, f, indent=2)
+            json.dump(
+                {
+                    "model_name": best_name,
+                    "features": feature_cols,
+                    "metrics": best_metrics,
+                    "horizon_hours": horizon_hours,
+                },
+                f,
+                indent=2,
+            )
 
         mr = project.get_model_registry()
         registered = mr.sklearn.create_model(
             name="aqi_best_model",
             metrics=best_metrics,
-            description=f"Best model chosen by RMSE: {best_name}",
+            description=f"Best model chosen by RMSE: {best_name} for {horizon_hours}-hour horizon",
         )
         registered.save(tmp)
 
-    logging.info("Best model '%s' saved to model registry with metrics %s", best_name, best_metrics)
+    logging.info(
+        "Best model '%s' saved to model registry with metrics %s for %sh horizon",
+        best_name,
+        best_metrics,
+        horizon_hours,
+    )
 
 
 if __name__ == "__main__":

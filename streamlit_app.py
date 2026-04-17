@@ -130,6 +130,7 @@ def main() -> None:
             "rolling_std_24h",
         ],
     )
+    horizon_hours = int(metadata.get("horizon_hours", 72))
 
     pred = float(model.predict(latest[feature_cols])[0])
     current_aqi = float(ready["aqi"].iloc[-1])
@@ -142,7 +143,7 @@ def main() -> None:
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Current AQI", f"{current_aqi:.1f}")
-    c2.metric("Predicted AQI (+72h)", f"{pred:.1f}")
+    c2.metric(f"Predicted AQI (+{horizon_hours}h)", f"{pred:.1f}")
     c3.metric("Rows in Feature Store", f"{row_count}")
 
     st.markdown(
@@ -185,7 +186,7 @@ def main() -> None:
     st.subheader("Forecast Snapshot")
     forecast_df = pd.DataFrame(
         {
-            "metric": ["Current AQI", "72h Forecast", "Forecast Category", "Feature Rows"],
+            "metric": ["Current AQI", f"{horizon_hours}h Forecast", "Forecast Category", "Feature Rows"],
             "value": [f"{current_aqi:.1f}", f"{pred:.1f}", category, f"{row_count}"],
         }
     )
