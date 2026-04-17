@@ -58,7 +58,7 @@ def _open_meteo_weather(lat: float, lon: float, start_date: str, end_date: str) 
         {
             "timestamp": pd.to_datetime(hourly.get("time", []), utc=True),
             "temperature": hourly.get("temperature_2m", []),
-            "humidity": hourly.get("relative_humidity_2m", []),
+            "humidity": pd.Series(hourly.get("relative_humidity_2m", []), dtype=float),
             "wind_speed": hourly.get("wind_speed_10m", []),
         }
     )

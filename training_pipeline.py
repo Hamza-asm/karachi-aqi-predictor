@@ -53,8 +53,12 @@ def main() -> None:
 
     fg = fs.get_feature_group(name="aqi_features", version=1)
     raw = fg.read()
+    logging.info("Raw data shape: %s", raw.shape)
+    logging.info("Raw data columns: %s", raw.columns.tolist())
+    logging.info("Raw data dtypes:\n%s", raw.dtypes)
 
     train_df = build_training_frame(raw, horizon=72)
+    logging.info("Training frame shape after build_training_frame: %s", train_df.shape)
 
     feature_cols = [
         "pm25",

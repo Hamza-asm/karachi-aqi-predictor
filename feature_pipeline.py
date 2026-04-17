@@ -80,6 +80,12 @@ def main() -> None:
     latest = fetch_aqicn_current(city=city, api_key=aqicn_api_key)
     latest = add_base_time_features(latest)
 
+    logging.info("Raw AQICN data collected:")
+    logging.info("\nDataFrame shape: %s", latest.shape)
+    logging.info("\nDataFrame dtypes:\n%s", latest.dtypes)
+    logging.info("\nDataFrame preview:\n%s", latest)
+    logging.info("\nDataFrame info:\n%s", latest.info())
+
     project = hopsworks.login(host=host, api_key_value=hopsworks_api_key)
     fs = project.get_feature_store()
 
