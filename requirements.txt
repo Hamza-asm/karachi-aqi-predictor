@@ -1,4 +1,4 @@
-hopsworks==4.7.*
+hopsworks[python]==4.7.*
 pandas<2.4.0
 numpy<2.5.0,>=1.26.3
 scikit-learn
