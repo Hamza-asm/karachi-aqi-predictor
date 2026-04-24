@@ -65,9 +65,9 @@ def add_engineered_features(df: pd.DataFrame) -> pd.DataFrame:
     data = ensure_datetime_utc(df)
     data = data.sort_values("timestamp").reset_index(drop=True)
 
-    data["hour_of_day"] = data["timestamp"].dt.hour.astype(int)
-    data["day_of_week"] = data["timestamp"].dt.dayofweek.astype(int)
-    data["month"] = data["timestamp"].dt.month.astype(int)
+    data["hour_of_day"] = data["timestamp"].dt.hour.astype("int32")
+    data["day_of_week"] = data["timestamp"].dt.dayofweek.astype("int32")
+    data["month"] = data["timestamp"].dt.month.astype("int32")
 
     data["hour_sin"] = np.sin(2 * np.pi * data["hour_of_day"] / 24)
     data["hour_cos"] = np.cos(2 * np.pi * data["hour_of_day"] / 24)
