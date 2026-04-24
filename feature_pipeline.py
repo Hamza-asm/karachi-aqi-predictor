@@ -9,11 +9,12 @@ import pandas as pd
 import requests
 from dotenv import load_dotenv
 
+from aqi_feature_utils import build_feature_row_for_insert, safe_float
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 
 def fetch_aqicn_current(city: str, api_key: str) -> pd.DataFrame:
-    """Fetch current AQI and pollutant/weather values for a city from AQICN."""
     url = f"https://api.waqi.info/feed/{city}/"
     response = requests.get(url, params={"token": api_key}, timeout=30)
     response.raise_for_status()
@@ -25,9 +26,9 @@ def fetch_aqicn_current(city: str, api_key: str) -> pd.DataFrame:
     data = payload.get("data", {})
     iaqi = data.get("iaqi", {})
 
-    def val(key: str, default: float = 0.0) -> float:
+    def val(key: str) -> float:
         raw = iaqi.get(key, {}).get("v")
-        return float(raw) if raw is not None else default
+        return safe_float(raw)
 
     raw_ts = data.get("time", {}).get("iso")
     if raw_ts:
@@ -35,32 +36,36 @@ def fetch_aqicn_current(city: str, api_key: str) -> pd.DataFrame:
     else:
         ts = datetime.now(timezone.utc)
 
-    # Round to hour for consistent event time keys.
     ts = ts.replace(minute=0, second=0, microsecond=0)
 
-    row = {
-        "timestamp": ts,
-        "aqi": float(data.get("aqi", 0.0)),
-        "pm25": val("pm25"),
-        "pm10": val("pm10"),
-        "o3": val("o3"),
-        "no2": val("no2"),
-        "so2": val("so2"),
-        "co": val("co"),
-        "temperature": val("t"),
-        "humidity": val("h"),
-        "wind_speed": val("w"),
-    }
-    return pd.DataFrame([row])
+    return pd.DataFrame(
+        [
+            {
+                "timestamp": ts,
+                "aqi": safe_float(data.get("aqi")),
+                "pm25": val("pm25"),
+                "pm10": val("pm10"),
+                "o3": val("o3"),
+                "no2": val("no2"),
+                "so2": val("so2"),
+                "co": val("co"),
+                "temperature": val("t"),
+                "humidity": val("h"),
+                "wind_speed": val("w"),
+            }
+        ]
+    )
 
 
-def add_base_time_features(df: pd.DataFrame) -> pd.DataFrame:
-    data = df.copy()
-    data["timestamp"] = pd.to_datetime(data["timestamp"], utc=True)
-    data["hour_of_day"] = data["timestamp"].dt.hour
-    data["day_of_week"] = data["timestamp"].dt.dayofweek
-    data["month"] = data["timestamp"].dt.month
-    return data
+def load_history(feature_store: object) -> pd.DataFrame:
+    try:
+        fg = feature_store.get_feature_group(name="aqi_features", version=1)
+        history = fg.read(online=False)
+        if history is None or history.empty:
+            return pd.DataFrame()
+        return history
+    except Exception:
+        return pd.DataFrame()
 
 
 def main() -> None:
@@ -78,23 +83,23 @@ def main() -> None:
         raise RuntimeError("AQICN_API_KEY is missing")
 
     latest = fetch_aqicn_current(city=city, api_key=aqicn_api_key)
-    latest = add_base_time_features(latest)
-
-    logging.info("Raw AQICN data collected:")
-    logging.info("\nDataFrame shape: %s", latest.shape)
-    logging.info("\nDataFrame dtypes:\n%s", latest.dtypes)
-    logging.info("\nDataFrame preview:\n%s", latest)
-    logging.info("\nDataFrame info:\n%s", latest.info())
+    logging.info("Collected AQICN payload: %s", latest.to_dict(orient="records")[0])
 
     project = hopsworks.login(host=host, api_key_value=hopsworks_api_key)
     fs = project.get_feature_store()
+
+    history = load_history(fs)
+    latest = build_feature_row_for_insert(history, latest)
+
+    logging.info("Feature row columns: %s", latest.columns.tolist())
+    logging.info("Feature row preview: %s", latest.to_dict(orient="records")[0])
 
     fg = fs.get_or_create_feature_group(
         name="aqi_features",
         version=1,
         primary_key=["timestamp"],
         event_time="timestamp",
-        description="Hourly AQI and weather features for Karachi",
+        description="AQICN-only AQI features for Karachi with lag and cyclical encoding",
     )
 
     fg.insert(latest)

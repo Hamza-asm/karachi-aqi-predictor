@@ -9,3 +9,4 @@ python-dotenv
 requests
 joblib
 plotly
+tensorflow==2.16.1

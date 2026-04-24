@@ -3,12 +3,15 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+from datetime import datetime, timezone
 
 import hopsworks
 import numpy as np
 import pandas as pd
 import requests
 from dotenv import load_dotenv
+
+from aqi_feature_utils import add_engineered_features
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -64,37 +67,35 @@ def _open_meteo_weather(lat: float, lon: float, start_date: str, end_date: str) 
     )
 
 
-def _estimate_aqi(df: pd.DataFrame) -> pd.Series:
-    score = (
-        1.1 * df["pm25"]
-        + 0.2 * (df["pm10"] / 2)
-        + 0.15 * df["no2"]
-        + 0.05 * df["o3"]
-        - 2.0 * df["wind_speed"]
-    )
-    return np.clip(score, 0, 500)
-
-
-def build_backfill_dataset(start_date: str, end_date: str, lat: float, lon: float) -> pd.DataFrame:
+def build_backfill_dataset(start_date: str, end_date: str, lat: float, lon: float, aqi_mode: str) -> pd.DataFrame:
     air = _open_meteo_air_quality(lat, lon, start_date, end_date)
     weather = _open_meteo_weather(lat, lon, start_date, end_date)
-    data = air.merge(weather, on="timestamp", how="inner").sort_values("timestamp")
+    data = air.merge(weather, on="timestamp", how="inner").sort_values("timestamp").reset_index(drop=True)
 
-    data["aqi"] = _estimate_aqi(data)
-    data["hour_of_day"] = data["timestamp"].dt.hour
-    data["day_of_week"] = data["timestamp"].dt.dayofweek
-    data["month"] = data["timestamp"].dt.month
-
-    data = data.dropna().reset_index(drop=True)
+    if aqi_mode == "pm25":
+        data["aqi"] = pd.to_numeric(data["pm25"], errors="coerce")
+    else:
+        data["aqi"] = np.nan
+    data = add_engineered_features(data)
     return data
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Backfill historical AQI features into Hopsworks")
-    parser.add_argument("--start-date", required=True, help="YYYY-MM-DD")
-    parser.add_argument("--end-date", required=True, help="YYYY-MM-DD")
+    parser.add_argument("--start-date", default="2025-03-04", help="YYYY-MM-DD")
+    parser.add_argument(
+        "--end-date",
+        default=datetime.now(timezone.utc).date().isoformat(),
+        help="YYYY-MM-DD",
+    )
     parser.add_argument("--lat", type=float, default=24.8607)
     parser.add_argument("--lon", type=float, default=67.0011)
+    parser.add_argument(
+        "--aqi-mode",
+        choices=["pm25", "null"],
+        default="pm25",
+        help="Backfill AQI behavior: pm25 proxy or null",
+    )
     return parser.parse_args()
 
 
@@ -113,7 +114,11 @@ def main() -> None:
         end_date=args.end_date,
         lat=args.lat,
         lon=args.lon,
+        aqi_mode=args.aqi_mode,
     )
+
+    logging.info("Backfill rows prepared: %s", len(backfill_df))
+    logging.info("Backfill date range: %s -> %s", backfill_df["timestamp"].min(), backfill_df["timestamp"].max())
 
     project = hopsworks.login(host=host, api_key_value=hopsworks_api_key)
     fs = project.get_feature_store()
@@ -122,8 +127,18 @@ def main() -> None:
         version=1,
         primary_key=["timestamp"],
         event_time="timestamp",
-        description="Hourly AQI and weather features for Karachi",
+        description="AQICN-only AQI features for Karachi with lag and cyclical encoding",
     )
+
+    try:
+        existing = fg.read(online=False)
+        if existing is not None and not existing.empty:
+            existing["timestamp"] = pd.to_datetime(existing["timestamp"], utc=True)
+            existing_timestamps = set(existing["timestamp"])
+            backfill_df = backfill_df[~backfill_df["timestamp"].isin(existing_timestamps)].copy()
+            logging.info("Rows remaining after duplicate timestamp filter: %s", len(backfill_df))
+    except Exception:
+        pass
 
     fg.insert(backfill_df)
     logging.info(
