@@ -33,7 +33,7 @@ from aqi_feature_utils import (
 # ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Karachi AQI Predictor",
-    page_icon="🌫️",
+    page_icon="☁️",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
@@ -84,6 +84,15 @@ html, body, [class*="css"] {
     font-size: 0.78rem;
     color: #475569;
     text-align: right;
+}
+.aqi-attribution {
+    font-family: 'DM Sans', sans-serif;
+    font-size: 0.8rem;
+    font-weight: 300;
+    letter-spacing: 0.04em;
+    color: #94a3b8;
+    text-align: right;
+    white-space: nowrap;
 }
 
 /* KPI strip */
@@ -324,6 +333,25 @@ AQI_COLORS = {
 }
 
 
+def pm25_to_aqi(pm25: float | None) -> float:
+    """Convert PM2.5 concentration to the US EPA AQI scale."""
+    if pm25 is None or pd.isna(pm25):
+        return float("nan")
+    if pm25 < 0:
+        return 0.0
+    if pm25 <= 12.0:
+        return ((50 - 0) / (12.0 - 0)) * (pm25 - 0) + 0
+    if pm25 <= 35.4:
+        return ((100 - 51) / (35.4 - 12.1)) * (pm25 - 12.1) + 51
+    if pm25 <= 55.4:
+        return ((150 - 101) / (55.4 - 35.5)) * (pm25 - 35.5) + 101
+    if pm25 <= 150.4:
+        return ((200 - 151) / (150.4 - 55.5)) * (pm25 - 55.5) + 151
+    if pm25 <= 250.4:
+        return ((300 - 201) / (250.4 - 150.5)) * (pm25 - 150.5) + 201
+    return 301.0
+
+
 # ── Data classes & helpers ─────────────────────────────────────────────────────
 @dataclass
 class ModelBundle:
@@ -494,6 +522,12 @@ def _fmt_metric(value: float | None) -> str:
 
 def _model_display_name(model_name: str) -> str:
     return model_name.replace("_", " ").upper()
+
+
+def _display_aqi_value(value: float | None) -> float:
+    if value is None or pd.isna(value):
+        return float("nan")
+    return pm25_to_aqi(float(value))
 
 
 def _comparison_frame(bundle: ModelBundle) -> pd.DataFrame:
@@ -753,9 +787,10 @@ def main() -> None:
     st.markdown("""
     <div class="aqi-header">
         <div>
-            <div class="aqi-title">🌫️ Karachi AQI Predictor</div>
+            <div class="aqi-title">☁️ Karachi AQI Predictor</div>
             <div class="aqi-subtitle">Real-time forecasting · AQICN data · Hopsworks feature store</div>
         </div>
+        <div class="aqi-attribution">Designed &amp; Developed by Hamza Ali Khan</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -802,14 +837,16 @@ def main() -> None:
             st.error(f"Failed to load {horizon}h model: {exc}")
             return
 
-    current_aqi   = float(history["aqi"].iloc[-1])
+    current_source = float(history["pm25"].iloc[-1]) if "pm25" in history.columns else float(history["aqi"].iloc[-1])
+    current_aqi   = _display_aqi_value(current_source)
+    display_predictions = {horizon: _display_aqi_value(value) for horizon, value in predictions.items()}
     current_label, current_color = aqi_category(current_aqi)
     latest_ts     = history["timestamp"].iloc[-1].strftime("%Y-%m-%d %H:%M UTC")
-    any_alert     = any(v > 150 for v in predictions.values())
+    any_alert     = any(v > 150 for v in display_predictions.values())
 
     # ── Alert banner ──────────────────────────────────────────────────────────
     if any_alert:
-        bad_horizons = [f"{h}h" for h, v in predictions.items() if v > 150]
+        bad_horizons = [f"{h}h" for h, v in display_predictions.items() if v > 150]
         st.markdown(f"""
         <div class="alert-danger">
             <span style="font-size:1.4rem">⚠️</span>
@@ -858,7 +895,7 @@ def main() -> None:
 
         cards_html = '<div class="forecast-grid">'
         for horizon in [24, 48, 72]:
-            pred              = predictions[horizon]
+            pred              = display_predictions[horizon]
             label, color      = aqi_category(pred)
             conf_label, conf_pct = CONFIDENCE_LABELS[horizon]
             text_color        = "#111" if color in ("#22c55e", "#eab308") else "#fff"
@@ -877,9 +914,10 @@ def main() -> None:
 
         st.markdown('<div class="section-header">Recent AQI Trend (72h)</div>', unsafe_allow_html=True)
         trend = history.tail(72).copy()
+        trend["display_aqi"] = trend["pm25"].apply(pm25_to_aqi) if "pm25" in trend.columns else trend["aqi"]
         fig   = go.Figure()
         fig.add_trace(go.Scatter(
-            x=trend["timestamp"], y=trend["aqi"],
+            x=trend["timestamp"], y=trend["display_aqi"],
             mode="lines",
             line=dict(color="#3b82f6", width=2.5, shape="spline", smoothing=0.8),
             fill="tozeroy",
@@ -889,16 +927,17 @@ def main() -> None:
         ))
         last_ts  = trend["timestamp"].iloc[-1]
         for horizon, pred in predictions.items():
+            display_pred = display_predictions[horizon]
             fig.add_trace(go.Scatter(
                 x=[last_ts + pd.Timedelta(hours=horizon)],
-                y=[pred],
+                y=[display_pred],
                 mode="markers+text",
                 marker=dict(size=10, color="#06b6d4", symbol="diamond"),
                 text=[f"+{horizon}h"],
                 textposition="top center",
                 textfont=dict(size=10, color="#94a3b8"),
                 name=f"{horizon}h forecast",
-                hovertemplate=f"<b>+{horizon}h forecast</b><br>AQI: {pred:.1f}<extra></extra>",
+                hovertemplate=f"<b>+{horizon}h forecast</b><br>AQI: {display_pred:.1f}<extra></extra>",
             ))
         fig.update_layout(
             paper_bgcolor="rgba(0,0,0,0)",
@@ -911,7 +950,7 @@ def main() -> None:
             yaxis=dict(
                 gridcolor="#1e2d4a", zeroline=False,
                 tickfont=dict(size=11),
-                range=[max(0, trend["aqi"].min() - 5), trend["aqi"].max() + 8],
+                range=[max(0, trend["display_aqi"].min() - 5), trend["display_aqi"].max() + 8],
             ),
             hovermode="x unified",
         )
