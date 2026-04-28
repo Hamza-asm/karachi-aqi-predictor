@@ -16,6 +16,20 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 KARACHI_LAT = 24.8608
 KARACHI_LON = 67.0011
 
+AQICN_COLUMNS = [
+    "timestamp",
+    "aqi",
+    "pm25",
+    "pm10",
+    "o3",
+    "no2",
+    "so2",
+    "co",
+    "temperature",
+    "humidity",
+    "wind_speed",
+]
+
 # Forecast windows to compute: (label, start_hour, end_hour)
 FORECAST_WINDOWS = [("24h", 0, 24), ("48h", 24, 48), ("72h", 48, 72)]
 
@@ -58,6 +72,34 @@ def fetch_aqicn_current(city: str, api_key: str) -> pd.DataFrame:
         "humidity":    val("h"),
         "wind_speed":  val("w"),
     }])
+
+
+def fallback_aqicn_current(history: pd.DataFrame) -> pd.DataFrame:
+    """Build a best-effort AQICN row when the live API is unavailable."""
+    now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+
+    if history is not None and not history.empty:
+        latest_history = history.sort_values("timestamp").tail(1).copy().reset_index(drop=True)
+        latest_history.loc[:, "timestamp"] = now
+        logging.warning("AQICN unavailable; reusing the latest feature-store row as a fallback")
+        return latest_history
+
+    logging.warning("AQICN unavailable and no history exists; creating an empty fallback row")
+    return pd.DataFrame([
+        {
+            "timestamp": now,
+            "aqi": float("nan"),
+            "pm25": float("nan"),
+            "pm10": float("nan"),
+            "o3": float("nan"),
+            "no2": float("nan"),
+            "so2": float("nan"),
+            "co": float("nan"),
+            "temperature": float("nan"),
+            "humidity": float("nan"),
+            "wind_speed": float("nan"),
+        }
+    ], columns=AQICN_COLUMNS)
 
 
 def fetch_openmeteo_forecast(lat: float = KARACHI_LAT, lon: float = KARACHI_LON) -> pd.DataFrame:
@@ -142,11 +184,21 @@ def main() -> None:
     if not aqicn_api_key:
         raise RuntimeError("AQICN_API_KEY is missing")
 
-    # ── Step 1: fetch current AQI from AQICN ──────────────────────────────────
-    latest = fetch_aqicn_current(city=city, api_key=aqicn_api_key)
-    logging.info("AQICN payload: %s", latest.to_dict(orient="records")[0])
+    # ── Step 1: connect Hopsworks early so we have a fallback if AQICN fails ──
+    project = hopsworks.login(host=host, api_key_value=hopsworks_api_key)
+    fs      = project.get_feature_store()
+    history = load_history(fs)
 
-    # ── Step 2: fetch Open-Meteo forecast and compute window features ──────────
+    # ── Step 2: fetch current AQI from AQICN ──────────────────────────────────
+    try:
+        latest = fetch_aqicn_current(city=city, api_key=aqicn_api_key)
+        logging.info("AQICN payload: %s", latest.to_dict(orient="records")[0])
+    except Exception as exc:
+        logging.warning("AQICN fetch failed, using fallback row instead: %s", exc)
+        latest = fallback_aqicn_current(history)
+        logging.info("Fallback AQICN payload: %s", latest.to_dict(orient="records")[0])
+
+    # ── Step 3: fetch Open-Meteo forecast and compute window features ──────────
     try:
         forecast_df       = fetch_openmeteo_forecast()
         current_ts        = latest["timestamp"].iloc[0]
@@ -160,16 +212,13 @@ def main() -> None:
             for col in ["fc_pm25", "fc_co", "fc_no2", "fc_so2", "fc_o3", "fc_dust", "fc_uvi"]:
                 latest[f"{col}_{label}"] = float("nan")
 
-    # ── Step 3: connect Hopsworks, load history, compute lag/rolling ───────────
-    project = hopsworks.login(host=host, api_key_value=hopsworks_api_key)
-    fs      = project.get_feature_store()
-    history = load_history(fs)
+    # ── Step 4: compute lag/rolling features and insert into feature store ────
     latest  = build_feature_row_for_insert(history, latest)
 
     logging.info("Feature row columns : %s", latest.columns.tolist())
     logging.info("Feature row preview : %s", latest.to_dict(orient="records")[0])
 
-    # ── Step 4: insert into feature group ─────────────────────────────────────
+    # ── Step 5: insert into feature group ─────────────────────────────────────
     fg = fs.get_or_create_feature_group(
         name        = "aqi_features",
         version     = 1,
