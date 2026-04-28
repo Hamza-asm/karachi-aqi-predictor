@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import textwrap
 from dataclasses import dataclass
 
 import hopsworks
@@ -9,10 +10,19 @@ import joblib
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import shap
+import time
 import streamlit as st
 from dotenv import load_dotenv
 from tensorflow import keras
+
+try:
+    from lime.lime_tabular import LimeTabularExplainer
+    LIME_AVAILABLE = True
+except Exception:
+    LimeTabularExplainer = None
+    LIME_AVAILABLE = False
 
 from aqi_feature_utils import (
     aqi_category,
@@ -321,6 +331,7 @@ class ModelBundle:
     model_name: str
     model_type: str
     metrics: dict
+    all_model_metrics: dict[str, dict] | None
     model: object
     model_dir: str
     scaler: object | None = None
@@ -328,7 +339,7 @@ class ModelBundle:
     feature_cols: list[str] | None = None
 
 
-@st.cache_resource(show_spinner=False)
+@st.cache_resource(ttl=300, show_spinner=False)
 def _login() -> hopsworks.project.Project:
     load_dotenv()
     host = os.getenv("HOPSWORKS_HOST", "eu-west.cloud.hopsworks.ai")
@@ -340,8 +351,9 @@ def _login() -> hopsworks.project.Project:
     return hopsworks.login(host=host, api_key_value=api_key)
 
 
-@st.cache_resource(show_spinner=False)
+@st.cache_resource(ttl=300, show_spinner=False)
 def _load_model_bundle(_mr, horizon: int) -> ModelBundle:
+    # Load the latest registered model for the horizon each call (no long-lived cache)
     registered_model = _mr.get_best_model(f"aqi_model_{horizon}h", metric="rmse", direction="min")
     model_dir = registered_model.download()
 
@@ -356,6 +368,7 @@ def _load_model_bundle(_mr, horizon: int) -> ModelBundle:
     feature_cols  = metadata.get("features", feature_columns())
     lookback      = int(metadata.get("lookback_window", 24))
     metrics       = metadata.get("metrics", {})
+    all_metrics   = metadata.get("all_model_metrics", {})
 
     if model_type == "tensorflow":
         model  = keras.models.load_model(os.path.join(model_dir, "model.keras"))
@@ -368,11 +381,12 @@ def _load_model_bundle(_mr, horizon: int) -> ModelBundle:
     return ModelBundle(
         horizon=horizon, model_name=metadata.get("model_name", f"aqi_model_{horizon}h"),
         model_type=model_type, metrics=metrics, model=model, model_dir=model_dir,
-        scaler=scaler, lookback_window=lookback, feature_cols=feature_cols,
+        all_model_metrics=all_metrics, scaler=scaler, lookback_window=lookback,
+        feature_cols=feature_cols,
     )
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner=False)
 def _load_history(_fs) -> pd.DataFrame:
     fg   = _fs.get_feature_group(name="aqi_features", version=1)
     data = fg.read(online=False)
@@ -397,8 +411,15 @@ def _predict(bundle: ModelBundle, history: pd.DataFrame) -> float:
 
 
 def _shap_importance(bundle: ModelBundle, history: pd.DataFrame) -> pd.DataFrame:
+    cache_key = f"shap::{bundle.model_dir}::{len(history)}::{history['timestamp'].iloc[-1].value if not history.empty else 0}"
+    cached = st.session_state.get(cache_key)
+    if cached is not None:
+        return cached
+
     if bundle.model_type == "tensorflow":
-        return pd.DataFrame(columns=["feature", "importance"])
+        result = pd.DataFrame(columns=["feature", "importance"])
+        st.session_state[cache_key] = result
+        return result
     sample  = history.tail(min(200, len(history)))
     x       = sample[bundle.feature_cols]
     if hasattr(bundle.model, "coef_"):
@@ -414,6 +435,41 @@ def _shap_importance(bundle: ModelBundle, history: pd.DataFrame) -> pd.DataFrame
         .sort_values("importance", ascending=False)
         .reset_index(drop=True)
     )
+
+
+def _lime_importance(bundle: ModelBundle, history: pd.DataFrame) -> pd.DataFrame:
+    cache_key = f"lime::{bundle.model_dir}::{len(history)}::{history['timestamp'].iloc[-1].value if not history.empty else 0}"
+    cached = st.session_state.get(cache_key)
+    if cached is not None:
+        return cached
+
+    if not LIME_AVAILABLE or bundle.model_type == "tensorflow":
+        result = pd.DataFrame(columns=["feature", "weight"])
+        st.session_state[cache_key] = result
+        return result
+
+    background = history.tail(min(500, len(history)))[bundle.feature_cols].copy()
+    if background.empty:
+        result = pd.DataFrame(columns=["feature", "weight"])
+        st.session_state[cache_key] = result
+        return result
+
+    row = history.tail(1)[bundle.feature_cols].iloc[0].to_numpy()
+    def _lime_predict(values: np.ndarray) -> np.ndarray:
+        frame = pd.DataFrame(values, columns=bundle.feature_cols)
+        return bundle.model.predict(frame)
+
+    explainer = LimeTabularExplainer(
+        training_data=background.to_numpy(),
+        feature_names=bundle.feature_cols,
+        mode="regression",
+        discretize_continuous=True,
+        random_state=42,
+    )
+    explanation = explainer.explain_instance(row, _lime_predict, num_features=min(10, len(bundle.feature_cols)))
+    result = pd.DataFrame(explanation.as_list(), columns=["feature", "weight"])
+    st.session_state[cache_key] = result
+    return result
 
 
 def _r2_color(r2: float | None) -> str:
@@ -436,6 +492,260 @@ def _fmt_metric(value: float | None) -> str:
     return f"{value:.4f}"
 
 
+def _model_display_name(model_name: str) -> str:
+    return model_name.replace("_", " ").upper()
+
+
+def _comparison_frame(bundle: ModelBundle) -> pd.DataFrame:
+    metrics = dict(bundle.all_model_metrics or {})
+    if bundle.model_name not in metrics:
+        metrics[bundle.model_name] = bundle.metrics
+
+    preferred_order = ["random_forest", "ridge", "xgboost", "lstm"]
+    ordered_names = [name for name in preferred_order if name in metrics]
+    ordered_names.extend(name for name in metrics if name not in ordered_names)
+
+    rows: list[dict[str, object]] = []
+    for name in ordered_names:
+        values = metrics.get(name, {}) or {}
+        rows.append(
+            {
+                "model": name,
+                "label": _model_display_name(name),
+                "rmse": values.get("rmse"),
+                "mae": values.get("mae"),
+                "r2": values.get("r2"),
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+def _comparison_chart(frame: pd.DataFrame, selected_model: str) -> go.Figure:
+    fig = make_subplots(
+        rows=1,
+        cols=3,
+        subplot_titles=("RMSE ↓", "MAE ↓", "R² ↑"),
+        horizontal_spacing=0.08,
+    )
+
+    color_map = ["#06b6d4" if model == selected_model else "#1e3a5f" for model in frame["model"]]
+    metrics = [("rmse", 1), ("mae", 2), ("r2", 3)]
+
+    for metric_name, col_idx in metrics:
+        fig.add_trace(
+            go.Bar(
+                x=frame["label"],
+                y=frame[metric_name],
+                marker=dict(color=color_map),
+                text=[_fmt_metric(value) for value in frame[metric_name]],
+                textposition="outside",
+                hovertemplate="<b>%{x}</b><br>" + metric_name.upper() + ": %{y:.4f}<extra></extra>",
+                showlegend=False,
+            ),
+            row=1,
+            col=col_idx,
+        )
+
+    fig.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(family="DM Sans", color="#94a3b8", size=12),
+        margin=dict(l=0, r=0, t=30, b=0),
+        height=360,
+        bargap=0.35,
+    )
+    for axis in ["xaxis", "xaxis2", "xaxis3"]:
+        fig.layout[axis].tickfont = dict(size=10)
+        fig.layout[axis].gridcolor = "rgba(0,0,0,0)"
+    for axis in ["yaxis", "yaxis2", "yaxis3"]:
+        fig.layout[axis].gridcolor = "#1e2d4a"
+        fig.layout[axis].zeroline = False
+
+    return fig
+
+
+def _model_buttons(bundle: ModelBundle, comparison_frame: pd.DataFrame, ui_prefix: str = "comparison") -> str:
+    state_key = f"{ui_prefix}_selected_model_{bundle.horizon}h"
+    if state_key not in st.session_state:
+        st.session_state[state_key] = bundle.model_name if bundle.model_name in set(comparison_frame["model"]) else comparison_frame.iloc[0]["model"]
+
+    selected_model = st.session_state[state_key]
+    button_cols = st.columns(max(1, len(comparison_frame)))
+
+    for column, (_, row) in zip(button_cols, comparison_frame.iterrows()):
+        label = row["label"]
+        model_name = row["model"]
+        with column:
+            if st.button(
+                label,
+                key=f"{ui_prefix}_{state_key}_{model_name}",
+                type="primary" if model_name == selected_model else "secondary",
+                use_container_width=True,
+            ):
+                st.session_state[state_key] = model_name
+                st.rerun()
+
+    return st.session_state[state_key]
+
+
+def _run_eda_points() -> list[tuple[str, str]]:
+    return [
+        ("Study scope", "Eleven regression models were compared across linear, nonlinear, and ensemble families."),
+        ("Input features", "PM2.5, PM10, NO2, SO2, CO, and O3 were used to build AQI predictions."),
+        ("Best model", "Random Forest achieved the strongest reported test performance (R² = 0.9987, RMSE = 3.25)."),
+        ("Key drivers", "PM2.5 and PM10 were the dominant predictors; gaseous pollutants contributed far less."),
+        ("Explainability", "SHAP and PDPs confirmed that particulate matter carries most of the AQI signal."),
+    ]
+
+
+def _render_metric_matrix(bundle: ModelBundle, selected_model: str) -> None:
+    comparison_frame = _comparison_frame(bundle)
+    if comparison_frame.empty:
+        st.info("No model metrics were stored for this horizon yet.")
+        return
+
+    selected_row = comparison_frame[comparison_frame["model"] == selected_model].iloc[0]
+    summary_cols = st.columns(3)
+    with summary_cols[0]:
+        st.metric("Selected model", _model_display_name(selected_model))
+    with summary_cols[1]:
+        st.metric("RMSE", _fmt_metric(selected_row["rmse"]))
+    with summary_cols[2]:
+        st.metric("R²", _fmt_metric(selected_row["r2"]))
+
+    st.plotly_chart(_comparison_chart(comparison_frame, selected_model), use_container_width=True)
+
+    st.dataframe(
+        comparison_frame[["label", "rmse", "mae", "r2"]].rename(
+            columns={"label": "model", "rmse": "RMSE", "mae": "MAE", "r2": "R²"}
+        ),
+        hide_index=True,
+        use_container_width=True,
+    )
+
+
+def _render_model_explainability(bundle: ModelBundle, history: pd.DataFrame, selected_model: str) -> None:
+    st.markdown("#### Feature Contribution Overview")
+
+    shap_df = _shap_importance(bundle, history)
+    lime_df = _lime_importance(bundle, history)
+
+    left, right = st.columns(2)
+    with left:
+        st.markdown("**SHAP**")
+        if shap_df.empty:
+            st.info("SHAP is not available for this model type.")
+        else:
+            top10 = shap_df.head(10)
+            fig = go.Figure(go.Bar(
+                x=top10["importance"],
+                y=top10["feature"],
+                orientation="h",
+                marker=dict(
+                    color=top10["importance"],
+                    colorscale=[[0, "#1e3a5f"], [0.5, "#3b82f6"], [1, "#06b6d4"]],
+                    showscale=False,
+                ),
+                text=[f"{v:.4f}" for v in top10["importance"]],
+                textposition="outside",
+                hovertemplate="<b>%{y}</b><br>SHAP: %{x:.4f}<extra></extra>",
+            ))
+            fig.update_layout(
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(family="DM Sans", color="#94a3b8", size=12),
+                margin=dict(l=0, r=80, t=10, b=0),
+                height=340,
+                xaxis=dict(gridcolor="#1e2d4a", zeroline=False, tickfont=dict(size=11)),
+                yaxis=dict(gridcolor="rgba(0,0,0,0)", tickfont=dict(size=12, color="#e2e8f0"), autorange="reversed"),
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+    with right:
+        st.markdown("**LIME**")
+        if not LIME_AVAILABLE:
+            st.info("Install `lime` to enable local explanations.")
+        elif lime_df.empty:
+            st.info("LIME is not available for this model type or there is not enough history yet.")
+        else:
+            fig = go.Figure(go.Bar(
+                x=lime_df["weight"],
+                y=lime_df["feature"],
+                orientation="h",
+                marker=dict(color=np.where(lime_df["weight"] >= 0, "#22c55e", "#ef4444")),
+                text=[f"{v:.4f}" for v in lime_df["weight"]],
+                textposition="outside",
+                hovertemplate="<b>%{y}</b><br>LIME: %{x:.4f}<extra></extra>",
+            ))
+            fig.update_layout(
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(family="DM Sans", color="#94a3b8", size=12),
+                margin=dict(l=0, r=80, t=10, b=0),
+                height=340,
+                xaxis=dict(gridcolor="#1e2d4a", zeroline=False, tickfont=dict(size=11)),
+                yaxis=dict(gridcolor="rgba(0,0,0,0)", tickfont=dict(size=12, color="#e2e8f0"), autorange="reversed"),
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+
+def _eda_feature_overview(history: pd.DataFrame, max_features: int = 6) -> None:
+    cols = [c for c in (history.columns.tolist()) if c not in ("timestamp", "aqi")]
+    if not cols:
+        st.info("No feature columns available for EDA.")
+        return
+    features = cols[:max_features]
+    sample = history.tail(2000).copy()
+
+    rows = (len(features) + 2) // 3
+    fig = make_subplots(rows=rows, cols=3, subplot_titles=features)
+    for i, feat in enumerate(features):
+        r = i // 3 + 1
+        c = i % 3 + 1
+        fig.add_trace(
+            go.Histogram(x=sample[feat], nbinsx=40, marker=dict(color="#3b82f6"), showlegend=False),
+            row=r, col=c,
+        )
+        fig.update_xaxes(title_text=feat, row=r, col=c)
+    fig.update_layout(height=220 * rows, margin=dict(t=30, b=10, l=0, r=0), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def _eda_corr_heatmap(history: pd.DataFrame, max_features: int = 12) -> None:
+    cols = [c for c in (history.columns.tolist()) if c not in ("timestamp", "aqi")]
+    if not cols:
+        return
+    features = cols[:max_features]
+    sample = history.tail(2000)[features].corr()
+    fig = go.Figure(data=go.Heatmap(
+        z=sample.values,
+        x=sample.columns,
+        y=sample.index,
+        colorscale="Viridis",
+        colorbar=dict(title="corr", tickfont=dict(color="#94a3b8")),
+    ))
+    fig.update_layout(height=480, margin=dict(t=10, b=10, l=10, r=10), paper_bgcolor="rgba(0,0,0,0)")
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def _eda_scatter_matrix(history: pd.DataFrame, features: list[str] | None = None) -> None:
+    import plotly.express as px
+
+    cols = [c for c in (history.columns.tolist()) if c not in ("timestamp", "aqi")]
+    if not cols:
+        return
+    if features is None:
+        features = cols[:4]
+    sample = history.tail(1000)[features]
+    if sample.empty:
+        return
+    fig = px.scatter_matrix(sample, dimensions=features, color_discrete_sequence=["#06b6d4"]) 
+    fig.update_traces(diagonal_visible=False)
+    fig.update_layout(height=600, margin=dict(t=30, b=10, l=0, r=0), paper_bgcolor="rgba(0,0,0,0)")
+    st.plotly_chart(fig, use_container_width=True)
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 def main() -> None:
 
@@ -455,6 +765,23 @@ def main() -> None:
         fs      = project.get_feature_store()
         mr      = project.get_model_registry()
 
+    # --- Live controls: manual refresh and optional auto-refresh ---
+    controls_col1, controls_col2 = st.columns([1, 3])
+    with controls_col1:
+        if st.button("Refresh now"):
+            st.rerun()
+    with controls_col2:
+        auto = st.checkbox("Auto-refresh", value=False)
+        interval = st.selectbox("Interval (s)", [30, 60, 120, 300, 600], index=3)
+
+    # If auto-refresh enabled, rerun when interval passes
+    if auto:
+        last = st.session_state.get("_last_auto_refresh", 0)
+        now = time.time()
+        if now - last > interval:
+            st.session_state["_last_auto_refresh"] = now
+            st.rerun()
+
     with st.spinner("Loading feature store history…"):
         history = _load_history(fs)
 
@@ -462,7 +789,7 @@ def main() -> None:
         st.error("No real AQICN rows are available yet. Run the feature pipeline first.")
         return
 
-    # ── Load models & predict ─────────────────────────────────────────────────
+    # ── Load models & predict (always fetch latest model during each run) ─────
     bundles:     dict[int, ModelBundle] = {}
     predictions: dict[int, float]       = {}
 
@@ -524,211 +851,445 @@ def main() -> None:
     </div>
     """, unsafe_allow_html=True)
 
-    # ── Forecast cards ────────────────────────────────────────────────────────
-    st.markdown('<div class="section-header">72-Hour Forecast</div>', unsafe_allow_html=True)
+    forecast_tab, comparison_tab, eda_tab = st.tabs(["Forecast", "Model Comparison", "EDA"])
 
-    cards_html = '<div class="forecast-grid">'
-    for horizon in [24, 48, 72]:
-        pred              = predictions[horizon]
-        label, color      = aqi_category(pred)
-        conf_label, conf_pct = CONFIDENCE_LABELS[horizon]
-        text_color        = "#111" if color in ("#22c55e", "#eab308") else "#fff"
-        cards_html += f"""
-        <div class="forecast-card">
-            <div class="fc-horizon">+{horizon} hours</div>
-            <div class="fc-confidence">{conf_label}</div>
-            <div class="fc-aqi">{pred:.1f}</div>
-            <div class="fc-badge" style="background:{color};color:{text_color};">{label}</div>
-            <div class="fc-confidence-bar">
-                <div class="fc-confidence-fill" style="width:{conf_pct}%;"></div>
-            </div>
-        </div>"""
-    cards_html += '</div>'
-    st.markdown(cards_html, unsafe_allow_html=True)
+    with forecast_tab:
+        st.markdown('<div class="section-header">72-Hour Forecast</div>', unsafe_allow_html=True)
 
-    # ── AQI Trend chart ───────────────────────────────────────────────────────
-    st.markdown('<div class="section-header">Recent AQI Trend (72h)</div>', unsafe_allow_html=True)
+        cards_html = '<div class="forecast-grid">'
+        for horizon in [24, 48, 72]:
+            pred              = predictions[horizon]
+            label, color      = aqi_category(pred)
+            conf_label, conf_pct = CONFIDENCE_LABELS[horizon]
+            text_color        = "#111" if color in ("#22c55e", "#eab308") else "#fff"
+            cards_html += f"""
+            <div class="forecast-card">
+                <div class="fc-horizon">+{horizon} hours</div>
+                <div class="fc-confidence">{conf_label}</div>
+                <div class="fc-aqi">{pred:.1f}</div>
+                <div class="fc-badge" style="background:{color};color:{text_color};">{label}</div>
+                <div class="fc-confidence-bar">
+                    <div class="fc-confidence-fill" style="width:{conf_pct}%;"></div>
+                </div>
+            </div>"""
+        cards_html += '</div>'
+        st.markdown(cards_html, unsafe_allow_html=True)
 
-    trend = history.tail(72).copy()
-    fig   = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=trend["timestamp"], y=trend["aqi"],
-        mode="lines",
-        line=dict(color="#3b82f6", width=2.5, shape="spline", smoothing=0.8),
-        fill="tozeroy",
-        fillcolor="rgba(59,130,246,0.08)",
-        name="AQI",
-        hovertemplate="<b>%{x|%b %d %H:%M}</b><br>AQI: %{y:.1f}<extra></extra>",
-    ))
-    # Add forecast dots
-    last_ts  = trend["timestamp"].iloc[-1]
-    last_aqi = trend["aqi"].iloc[-1]
-    for horizon, pred in predictions.items():
+        st.markdown('<div class="section-header">Recent AQI Trend (72h)</div>', unsafe_allow_html=True)
+        trend = history.tail(72).copy()
+        fig   = go.Figure()
         fig.add_trace(go.Scatter(
-            x=[last_ts + pd.Timedelta(hours=horizon)],
-            y=[pred],
-            mode="markers+text",
-            marker=dict(size=10, color="#06b6d4", symbol="diamond"),
-            text=[f"+{horizon}h"],
-            textposition="top center",
-            textfont=dict(size=10, color="#94a3b8"),
-            name=f"{horizon}h forecast",
-            hovertemplate=f"<b>+{horizon}h forecast</b><br>AQI: {pred:.1f}<extra></extra>",
+            x=trend["timestamp"], y=trend["aqi"],
+            mode="lines",
+            line=dict(color="#3b82f6", width=2.5, shape="spline", smoothing=0.8),
+            fill="tozeroy",
+            fillcolor="rgba(59,130,246,0.08)",
+            name="AQI",
+            hovertemplate="<b>%{x|%b %d %H:%M}</b><br>AQI: %{y:.1f}<extra></extra>",
         ))
-    fig.update_layout(
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(family="DM Sans", color="#94a3b8", size=12),
-        margin=dict(l=0, r=0, t=10, b=0),
-        height=280,
-        showlegend=False,
-        xaxis=dict(
-            gridcolor="#1e2d4a", zeroline=False,
-            tickformat="%b %d %H:%M", tickfont=dict(size=11),
-        ),
-        yaxis=dict(
-            gridcolor="#1e2d4a", zeroline=False,
-            tickfont=dict(size=11),
-            range=[max(0, trend["aqi"].min() - 5), trend["aqi"].max() + 8],
-        ),
-        hovermode="x unified",
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-    # ── Model metrics ─────────────────────────────────────────────────────────
-    st.markdown('<div class="section-header">Model Performance by Horizon</div>', unsafe_allow_html=True)
-
-    rows_html = ""
-    for horizon in [24, 48, 72]:
-        b    = bundles[horizon]
-        rmse = b.metrics.get("rmse")
-        mae  = b.metrics.get("mae")
-        r2   = b.metrics.get("r2")
-        conf_label, conf_pct = CONFIDENCE_LABELS[horizon]
-        rmse_txt = _fmt_metric(rmse)
-        mae_txt  = _fmt_metric(mae)
-        r2_txt   = _fmt_metric(r2)
-        rows_html += f"""
-        <tr>
-            <td><span style="font-family:'Space Mono',monospace;color:#f0f6ff;font-weight:700;">+{horizon}h</span></td>
-            <td>{b.model_name.upper()}</td>
-            <td>{conf_label}</td>
-            <td class="{_rmse_color(rmse)}">{rmse_txt}</td>
-            <td class="{_rmse_color(mae)}">{mae_txt}</td>
-            <td class="{_r2_color(r2)}">{r2_txt}</td>
-        </tr>"""
-
-    st.markdown(f"""
-    <table class="metrics-table">
-        <thead>
-            <tr>
-                <th>Horizon</th><th>Model</th><th>Confidence</th>
-                <th>RMSE ↓</th><th>MAE ↓</th><th>R² ↑</th>
-            </tr>
-        </thead>
-        <tbody>{rows_html}</tbody>
-    </table>
-    <p style="font-size:0.75rem;color:#475569;margin-top:0.75rem;">
-        72h forecasting is inherently harder — R² degrades with horizon length even in professional systems.
-        RMSE of ~10 AQI units is the practical floor without future weather forecast data.
-    </p>
-    """, unsafe_allow_html=True)
-
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    # ── SHAP feature importance ───────────────────────────────────────────────
-    st.markdown('<div class="section-header">24h Model — SHAP Feature Importance</div>', unsafe_allow_html=True)
-
-    shap_df = _shap_importance(bundles[24], history)
-    if shap_df.empty:
-        st.info("SHAP not available for this model type.")
-    else:
-        top10   = shap_df.head(10)
-        max_imp = top10["importance"].max()
-
-        fig2 = go.Figure(go.Bar(
-            x=top10["importance"],
-            y=top10["feature"],
-            orientation="h",
-            marker=dict(
-                color=top10["importance"],
-                colorscale=[[0, "#1e3a5f"], [0.5, "#3b82f6"], [1, "#06b6d4"]],
-                showscale=False,
-            ),
-            text=[f"{v:.4f}" for v in top10["importance"]],
-            textposition="outside",
-            textfont=dict(size=11, color="#94a3b8"),
-            hovertemplate="<b>%{y}</b><br>SHAP: %{x:.4f}<extra></extra>",
-        ))
-        fig2.update_layout(
+        last_ts  = trend["timestamp"].iloc[-1]
+        for horizon, pred in predictions.items():
+            fig.add_trace(go.Scatter(
+                x=[last_ts + pd.Timedelta(hours=horizon)],
+                y=[pred],
+                mode="markers+text",
+                marker=dict(size=10, color="#06b6d4", symbol="diamond"),
+                text=[f"+{horizon}h"],
+                textposition="top center",
+                textfont=dict(size=10, color="#94a3b8"),
+                name=f"{horizon}h forecast",
+                hovertemplate=f"<b>+{horizon}h forecast</b><br>AQI: {pred:.1f}<extra></extra>",
+            ))
+        fig.update_layout(
             paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="rgba(0,0,0,0)",
             font=dict(family="DM Sans", color="#94a3b8", size=12),
-            margin=dict(l=0, r=80, t=10, b=0),
-            height=360,
-            xaxis=dict(
-                gridcolor="#1e2d4a", zeroline=False,
-                range=[0, max_imp * 1.25],
-                tickfont=dict(size=11),
-            ),
+            margin=dict(l=0, r=0, t=10, b=0),
+            height=280,
+            showlegend=False,
+            xaxis=dict(gridcolor="#1e2d4a", zeroline=False, tickformat="%b %d %H:%M", tickfont=dict(size=11)),
             yaxis=dict(
-                gridcolor="rgba(0,0,0,0)",
-                tickfont=dict(size=12, color="#e2e8f0"),
-                autorange="reversed",
+                gridcolor="#1e2d4a", zeroline=False,
+                tickfont=dict(size=11),
+                range=[max(0, trend["aqi"].min() - 5), trend["aqi"].max() + 8],
             ),
+            hovermode="x unified",
         )
-        st.plotly_chart(fig2, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True)
 
-    # ── Experiment history ────────────────────────────────────────────────────
-    st.markdown('<div class="section-header">Experiment History</div>', unsafe_allow_html=True)
+    with comparison_tab:
+        st.markdown('<div class="section-header">Model Comparison</div>', unsafe_allow_html=True)
+        st.caption("Buttons select the model to inspect. The matrix shows all trained candidates for the chosen horizon.")
 
-    experiments = [
-        {
-            "step": "EXP 01",
-            "text": "Initial model trained on 23,809 rows including synthetic Open-Meteo AQI backfill (2023–2025).",
-            "outcome": "R² –0.33, RMSE 20.70 — negative R² means model worse than mean baseline.",
-            "cls": "bad",
-        },
-        {
-            "step": "EXP 02",
-            "text": "Distribution check confirmed 79% mean AQI shift between backfill (18.56) and real AQICN (33.23). Label mismatch identified as root cause.",
-            "outcome": "Synthetic backfill deleted. Feature group reset.",
-            "cls": "info",
-        },
-        {
-            "step": "EXP 03",
-            "text": "Retrained on clean AQICN-only data (2025-03-04 onward, 4,777 rows). No synthetic labels.",
-            "outcome": "R² still negative — label mismatch was not the only bottleneck.",
-            "cls": "bad",
-        },
-        {
-            "step": "EXP 04",
-            "text": "Added lag features (1h, 3h, 6h, 12h, 24h), rolling statistics (mean/std over 6h and 24h), and cyclical time encoding (sin/cos for hour and day-of-week). Rebuilt feature group with consistent schema.",
-            "outcome": "24h R² 0.2284, RMSE 10.03 — 50% RMSE reduction. Positive R² achieved.",
-            "cls": "good",
-        },
-        {
-            "step": "EXP 05",
-            "text": "Split into 3 separate models per horizon (24h, 48h, 72h). Ridge Regression outperformed Random Forest and LSTM on all horizons with current data volume.",
-            "outcome": "72h R² 0.1312 — accepted as practical ceiling without future weather data.",
-            "cls": "info",
-        },
-    ]
+        comparison_tabs = st.tabs(["24h", "48h", "72h"])
+        for tab, horizon in zip(comparison_tabs, [24, 48, 72]):
+            with tab:
+                bundle = bundles[horizon]
+                comparison_frame = _comparison_frame(bundle)
+                if comparison_frame.empty:
+                    st.info("No model metrics were stored for this horizon yet.")
+                    continue
 
-    for exp in experiments:
-        st.markdown(f"""
-        <div class="exp-card">
-            <div class="exp-step">{exp['step']}</div>
-            <div>
-                <div class="exp-text">{exp['text']}</div>
-                <div class="exp-outcome {exp['cls']}">→ {exp['outcome']}</div>
+                # Auto-select the best registered model for this horizon (buttons removed)
+                if bundle.model_name in set(comparison_frame["model"]):
+                    selected_model = bundle.model_name
+                else:
+                    selected_model = comparison_frame.iloc[0]["model"]
+
+                _render_metric_matrix(bundle, selected_model)
+                st.caption("Showing model metrics for the best candidate (auto-selected by RMSE).")
+
+    with eda_tab:
+        st.markdown('<div class="section-header">Exploratory Data Analysis</div>', unsafe_allow_html=True)
+
+        # ── Compute EDA stats from real data ──────────────────────────────────
+        eda_df = history.copy()
+        eda_df["timestamp"] = pd.to_datetime(eda_df["timestamp"], utc=True)
+        eda_df["hour"]  = eda_df["timestamp"].dt.hour
+        eda_df["month"] = eda_df["timestamp"].dt.month
+        eda_df["month_name"] = eda_df["timestamp"].dt.strftime("%b %Y")
+
+        aqi_mean   = eda_df["aqi"].mean()
+        aqi_std    = eda_df["aqi"].std()
+        aqi_min    = eda_df["aqi"].min()
+        aqi_max    = eda_df["aqi"].max()
+        aqi_median = eda_df["aqi"].median()
+        date_min   = eda_df["timestamp"].min().strftime("%b %d, %Y")
+        date_max   = eda_df["timestamp"].max().strftime("%b %d, %Y")
+        total_rows = len(eda_df)
+        total_cols = len(eda_df.columns)
+        good_pct   = (eda_df["aqi"] <= 50).mean() * 100
+        moderate_pct = ((eda_df["aqi"] > 50) & (eda_df["aqi"] <= 100)).mean() * 100
+        unhealthy_pct = (eda_df["aqi"] > 100).mean() * 100
+        pm25_corr  = eda_df[["aqi", "pm25"]].corr().iloc[0, 1]
+        peak_hour  = eda_df.groupby("hour")["aqi"].mean().idxmax()
+        clean_hour = eda_df.groupby("hour")["aqi"].mean().idxmin()
+
+        # ── Dataset Info Card ─────────────────────────────────────────────────
+        dataset_overview_html = textwrap.dedent("""
+        <div style="background:#111827;border:1px solid #1e2d4a;border-radius:14px;
+                    padding:1.4rem 1.6rem;margin-bottom:1.5rem;">
+            <div style="font-family:'Space Mono',monospace;font-size:0.72rem;font-weight:700;
+                        letter-spacing:0.1em;text-transform:uppercase;color:#3b82f6;
+                        margin-bottom:1rem;">Dataset Overview</div>
+        """) + textwrap.dedent(f"""
+            <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:1rem;">
+                <div>
+                    <div style="font-size:0.7rem;color:#64748b;text-transform:uppercase;
+                                letter-spacing:0.06em;margin-bottom:0.3rem;">Total Records</div>
+                    <div style="font-family:'Space Mono',monospace;font-size:1.5rem;
+                                font-weight:700;color:#f0f6ff;">{total_rows:,}</div>
+                    <div style="font-size:0.72rem;color:#475569;">hourly observations</div>
+                </div>
+                <div>
+                    <div style="font-size:0.7rem;color:#64748b;text-transform:uppercase;
+                                letter-spacing:0.06em;margin-bottom:0.3rem;">Date Range</div>
+                    <div style="font-family:'Space Mono',monospace;font-size:0.85rem;
+                                font-weight:700;color:#f0f6ff;">{date_min}</div>
+                    <div style="font-size:0.72rem;color:#475569;">to {date_max}</div>
+                </div>
+                <div>
+                    <div style="font-size:0.7rem;color:#64748b;text-transform:uppercase;
+                                letter-spacing:0.06em;margin-bottom:0.3rem;">Features</div>
+                    <div style="font-family:'Space Mono',monospace;font-size:1.5rem;
+                                font-weight:700;color:#f0f6ff;">{total_cols}</div>
+                    <div style="font-size:0.72rem;color:#475569;">engineered columns</div>
+                </div>
+                <div>
+                    <div style="font-size:0.7rem;color:#64748b;text-transform:uppercase;
+                                letter-spacing:0.06em;margin-bottom:0.3rem;">Data Source</div>
+                    <div style="font-family:'Space Mono',monospace;font-size:0.85rem;
+                                font-weight:700;color:#f0f6ff;">AQICN API</div>
+                    <div style="font-size:0.72rem;color:#475569;">US EPA AQI standard</div>
+                </div>
             </div>
-        </div>""", unsafe_allow_html=True)
+        </div>
+        """)
+        st.markdown("\n".join(line.lstrip() for line in dataset_overview_html.splitlines()), unsafe_allow_html=True)
+
+        # ── Descriptive Stats Card ────────────────────────────────────────────
+        descriptive_stats_html = textwrap.dedent("""
+        <div style="background:#111827;border:1px solid #1e2d4a;border-radius:14px;
+                    padding:1.4rem 1.6rem;margin-bottom:1.5rem;">
+            <div style="font-family:'Space Mono',monospace;font-size:0.72rem;font-weight:700;
+                        letter-spacing:0.1em;text-transform:uppercase;color:#3b82f6;
+                        margin-bottom:1rem;">AQI Descriptive Statistics</div>
+        """) + textwrap.dedent(f"""
+            <div style="display:grid;grid-template-columns:repeat(6,1fr);gap:0.75rem;margin-bottom:1.2rem;">
+                <div style="text-align:center;background:#0d1526;border-radius:10px;padding:0.8rem 0.5rem;">
+                    <div style="font-size:0.68rem;color:#64748b;text-transform:uppercase;margin-bottom:0.3rem;">Mean</div>
+                    <div style="font-family:'Space Mono',monospace;font-size:1.3rem;font-weight:700;color:#3b82f6;">{aqi_mean:.1f}</div>
+                </div>
+                <div style="text-align:center;background:#0d1526;border-radius:10px;padding:0.8rem 0.5rem;">
+                    <div style="font-size:0.68rem;color:#64748b;text-transform:uppercase;margin-bottom:0.3rem;">Median</div>
+                    <div style="font-family:'Space Mono',monospace;font-size:1.3rem;font-weight:700;color:#06b6d4;">{aqi_median:.1f}</div>
+                </div>
+                <div style="text-align:center;background:#0d1526;border-radius:10px;padding:0.8rem 0.5rem;">
+                    <div style="font-size:0.68rem;color:#64748b;text-transform:uppercase;margin-bottom:0.3rem;">Std Dev</div>
+                    <div style="font-family:'Space Mono',monospace;font-size:1.3rem;font-weight:700;color:#f0f6ff;">{aqi_std:.1f}</div>
+                </div>
+                <div style="text-align:center;background:#0d1526;border-radius:10px;padding:0.8rem 0.5rem;">
+                    <div style="font-size:0.68rem;color:#64748b;text-transform:uppercase;margin-bottom:0.3rem;">Min</div>
+                    <div style="font-family:'Space Mono',monospace;font-size:1.3rem;font-weight:700;color:#22c55e;">{aqi_min:.1f}</div>
+                </div>
+                <div style="text-align:center;background:#0d1526;border-radius:10px;padding:0.8rem 0.5rem;">
+                    <div style="font-size:0.68rem;color:#64748b;text-transform:uppercase;margin-bottom:0.3rem;">Max</div>
+                    <div style="font-family:'Space Mono',monospace;font-size:1.3rem;font-weight:700;color:#ef4444;">{aqi_max:.1f}</div>
+                </div>
+                <div style="text-align:center;background:#0d1526;border-radius:10px;padding:0.8rem 0.5rem;">
+                    <div style="font-size:0.68rem;color:#64748b;text-transform:uppercase;margin-bottom:0.3rem;">PM2.5 Corr</div>
+                    <div style="font-family:'Space Mono',monospace;font-size:1.3rem;font-weight:700;color:#a78bfa;">{pm25_corr:.3f}</div>
+                </div>
+            </div>
+            <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:0.75rem;">
+                <div style="background:#071a0f;border:1px solid #16a34a;border-radius:8px;
+                            padding:0.7rem 1rem;display:flex;justify-content:space-between;align-items:center;">
+                    <div>
+                        <div style="font-size:0.7rem;color:#86efac;font-weight:600;">🟢 Good (AQI ≤ 50)</div>
+                        <div style="font-size:0.72rem;color:#475569;margin-top:0.15rem;">Air quality satisfactory</div>
+                    </div>
+                    <div style="font-family:'Space Mono',monospace;font-size:1.3rem;font-weight:700;color:#22c55e;">{good_pct:.1f}%</div>
+                </div>
+                <div style="background:#1a1200;border:1px solid #ca8a04;border-radius:8px;
+                            padding:0.7rem 1rem;display:flex;justify-content:space-between;align-items:center;">
+                    <div>
+                        <div style="font-size:0.7rem;color:#fde68a;font-weight:600;">🟡 Moderate (51–100)</div>
+                        <div style="font-size:0.72rem;color:#475569;margin-top:0.15rem;">Acceptable for most</div>
+                    </div>
+                    <div style="font-family:'Space Mono',monospace;font-size:1.3rem;font-weight:700;color:#eab308;">{moderate_pct:.1f}%</div>
+                </div>
+                <div style="background:#2d0a0a;border:1px solid #dc2626;border-radius:8px;
+                            padding:0.7rem 1rem;display:flex;justify-content:space-between;align-items:center;">
+                    <div>
+                        <div style="font-size:0.7rem;color:#fca5a5;font-weight:600;">🔴 Unhealthy (> 100)</div>
+                        <div style="font-size:0.72rem;color:#475569;margin-top:0.15rem;">Health risk present</div>
+                    </div>
+                    <div style="font-family:'Space Mono',monospace;font-size:1.3rem;font-weight:700;color:#ef4444;">{unhealthy_pct:.1f}%</div>
+                </div>
+            </div>
+            <div style="margin-top:1rem;font-size:0.78rem;color:#64748b;line-height:1.6;">
+                Karachi's AQI averaged <b style="color:#e2e8f0;">{aqi_mean:.1f}</b> across {total_rows:,} hourly readings
+                from {date_min} to {date_max}. PM2.5 shows a strong correlation of
+                <b style="color:#a78bfa;">{pm25_corr:.3f}</b> with AQI, consistent with research literature identifying
+                PM2.5 as the dominant AQI driver. Air quality peaks at hour
+                <b style="color:#ef4444;">{peak_hour}:00</b> and is cleanest around
+                <b style="color:#22c55e;">{clean_hour}:00</b> on average.
+                Note: Values follow the <b style="color:#e2e8f0;">US EPA AQI standard</b> via AQICN —
+                different from the European EAQI shown on Open-Meteo and similar sites.
+            </div>
+        </div>
+        """)
+        st.markdown("\n".join(line.lstrip() for line in descriptive_stats_html.splitlines()), unsafe_allow_html=True)
+
+        # ── Chart 1 & 2 side by side ──────────────────────────────────────────
+        chart_col1, chart_col2 = st.columns(2)
+
+        # Chart 1: PM2.5 vs AQI scatter
+        with chart_col1:
+            st.markdown('<div class="section-header">PM2.5 vs AQI</div>', unsafe_allow_html=True)
+            scatter_df = eda_df[["pm25", "aqi"]].dropna().sample(min(2000, len(eda_df)), random_state=42)
+            fig_scatter = go.Figure()
+            fig_scatter.add_trace(go.Scatter(
+                x=scatter_df["pm25"],
+                y=scatter_df["aqi"],
+                mode="markers",
+                marker=dict(
+                    color=scatter_df["aqi"],
+                    colorscale=[
+                        [0.0,  "#22c55e"],
+                        [0.2,  "#eab308"],
+                        [0.4,  "#f97316"],
+                        [0.6,  "#ef4444"],
+                        [0.8,  "#a855f7"],
+                        [1.0,  "#dc2626"],
+                    ],
+                    size=4,
+                    opacity=0.6,
+                    showscale=True,
+                    colorbar=dict(
+                        title=dict(text="AQI", font=dict(color="#94a3b8", size=11)),
+                        tickfont=dict(color="#94a3b8", size=10),
+                        thickness=12,
+                    ),
+                ),
+                hovertemplate="PM2.5: %{x:.1f}<br>AQI: %{y:.1f}<extra></extra>",
+            ))
+            fig_scatter.update_layout(
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(family="DM Sans", color="#94a3b8", size=11),
+                margin=dict(l=0, r=0, t=10, b=0),
+                height=300,
+                xaxis=dict(title="PM2.5 (µg/m³)", gridcolor="#1e2d4a", zeroline=False),
+                yaxis=dict(title="AQI", gridcolor="#1e2d4a", zeroline=False),
+            )
+            st.plotly_chart(fig_scatter, use_container_width=True)
+            st.caption(f"Correlation: {pm25_corr:.3f} — PM2.5 is the strongest single predictor of AQI in Karachi.")
+
+        # Chart 2: Hourly AQI pattern
+        with chart_col2:
+            st.markdown('<div class="section-header">Average AQI by Hour of Day</div>', unsafe_allow_html=True)
+            hourly = eda_df.groupby("hour")["aqi"].agg(["mean", "std"]).reset_index()
+            fig_hour = go.Figure()
+            fig_hour.add_trace(go.Scatter(
+                x=hourly["hour"],
+                y=hourly["mean"] + hourly["std"],
+                mode="lines", line=dict(width=0),
+                showlegend=False, hoverinfo="skip",
+                fillcolor="rgba(59,130,246,0.1)",
+            ))
+            fig_hour.add_trace(go.Scatter(
+                x=hourly["hour"],
+                y=hourly["mean"] - hourly["std"],
+                mode="lines", line=dict(width=0),
+                fill="tonexty",
+                fillcolor="rgba(59,130,246,0.1)",
+                showlegend=False, hoverinfo="skip",
+            ))
+            fig_hour.add_trace(go.Scatter(
+                x=hourly["hour"],
+                y=hourly["mean"],
+                mode="lines+markers",
+                line=dict(color="#3b82f6", width=2.5, shape="spline", smoothing=0.8),
+                marker=dict(size=6, color="#06b6d4"),
+                hovertemplate="Hour %{x}:00<br>Avg AQI: %{y:.1f}<extra></extra>",
+                name="Mean AQI",
+            ))
+            fig_hour.update_layout(
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(family="DM Sans", color="#94a3b8", size=11),
+                margin=dict(l=0, r=0, t=10, b=0),
+                height=300,
+                showlegend=False,
+                xaxis=dict(
+                    title="Hour of Day (UTC)",
+                    gridcolor="#1e2d4a", zeroline=False,
+                    tickvals=list(range(0, 24, 3)),
+                    ticktext=[f"{h:02d}:00" for h in range(0, 24, 3)],
+                ),
+                yaxis=dict(title="Mean AQI", gridcolor="#1e2d4a", zeroline=False),
+            )
+            st.plotly_chart(fig_hour, use_container_width=True)
+            st.caption(f"Peak pollution at {peak_hour}:00 UTC, cleanest air at {clean_hour}:00 UTC. Shaded band = ±1 std dev.")
+
+        # ── Chart 3 & 4 side by side ──────────────────────────────────────────
+        chart_col3, chart_col4 = st.columns(2)
+
+        # Chart 3: Monthly average AQI bar chart
+        with chart_col3:
+            st.markdown('<div class="section-header">Monthly Average AQI</div>', unsafe_allow_html=True)
+            monthly = (
+                eda_df.groupby(eda_df["timestamp"].dt.to_period("M"))["aqi"]
+                .mean()
+                .reset_index()
+            )
+            monthly["period_str"] = monthly["timestamp"].astype(str)
+            monthly_colors = [
+                "#22c55e" if v <= 50 else
+                "#eab308" if v <= 100 else
+                "#f97316" if v <= 150 else
+                "#ef4444"
+                for v in monthly["aqi"]
+            ]
+            fig_monthly = go.Figure(go.Bar(
+                x=monthly["period_str"],
+                y=monthly["aqi"].round(1),
+                marker=dict(color=monthly_colors, opacity=0.85),
+                text=[f"{v:.1f}" for v in monthly["aqi"]],
+                textposition="outside",
+                textfont=dict(size=10, color="#94a3b8"),
+                hovertemplate="<b>%{x}</b><br>Avg AQI: %{y:.1f}<extra></extra>",
+            ))
+            fig_monthly.add_hline(
+                y=50, line=dict(color="#22c55e", dash="dot", width=1),
+                annotation_text="Good", annotation_font=dict(color="#22c55e", size=10),
+            )
+            fig_monthly.add_hline(
+                y=100, line=dict(color="#eab308", dash="dot", width=1),
+                annotation_text="Moderate", annotation_font=dict(color="#eab308", size=10),
+            )
+            fig_monthly.update_layout(
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(family="DM Sans", color="#94a3b8", size=11),
+                margin=dict(l=0, r=0, t=10, b=0),
+                height=300,
+                xaxis=dict(title="Month", gridcolor="rgba(0,0,0,0)", tickangle=-30, tickfont=dict(size=10)),
+                yaxis=dict(title="Mean AQI", gridcolor="#1e2d4a", zeroline=False),
+                bargap=0.25,
+            )
+            st.plotly_chart(fig_monthly, use_container_width=True)
+            worst_month = monthly.loc[monthly["aqi"].idxmax(), "period_str"]
+            best_month  = monthly.loc[monthly["aqi"].idxmin(), "period_str"]
+            st.caption(f"Worst month: {worst_month} ({monthly['aqi'].max():.1f}) · Best month: {best_month} ({monthly['aqi'].min():.1f}). Color = AQI category.")
+
+        # Chart 4: Full AQI history line chart
+        with chart_col4:
+            st.markdown('<div class="section-header">AQI Over Time (Full History)</div>', unsafe_allow_html=True)
+            daily_avg = (
+                eda_df.set_index("timestamp")["aqi"]
+                .resample("D").mean()
+                .reset_index()
+                .dropna()
+            )
+            fig_history = go.Figure()
+            fig_history.add_trace(go.Scatter(
+                x=daily_avg["timestamp"],
+                y=daily_avg["aqi"],
+                mode="lines",
+                line=dict(color="#3b82f6", width=1.5, shape="spline", smoothing=0.6),
+                fill="tozeroy",
+                fillcolor="rgba(59,130,246,0.06)",
+                hovertemplate="<b>%{x|%b %d, %Y}</b><br>Daily avg AQI: %{y:.1f}<extra></extra>",
+                name="Daily avg AQI",
+            ))
+            for threshold, color, label in [
+                (50,  "#22c55e", "Good"),
+                (100, "#eab308", "Moderate"),
+                (150, "#f97316", "Unhealthy (SG)"),
+            ]:
+                fig_history.add_hline(
+                    y=threshold,
+                    line=dict(color=color, dash="dot", width=1),
+                    annotation_text=label,
+                    annotation_position="top right",
+                    annotation_font=dict(color=color, size=9),
+                )
+            fig_history.update_layout(
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(family="DM Sans", color="#94a3b8", size=11),
+                margin=dict(l=0, r=0, t=10, b=0),
+                height=300,
+                showlegend=False,
+                xaxis=dict(gridcolor="#1e2d4a", zeroline=False, tickformat="%b %Y", tickfont=dict(size=10)),
+                yaxis=dict(
+                    title="Daily Avg AQI",
+                    gridcolor="#1e2d4a", zeroline=False,
+                    range=[0, min(eda_df["aqi"].max() + 15, 200)],
+                ),
+                hovermode="x unified",
+            )
+            st.plotly_chart(fig_history, use_container_width=True)
+            st.caption(f"Daily averages smoothed for clarity. Dotted lines = US EPA AQI category thresholds.")
+
+        # ── SHAP + LIME feature relationships (single view, no per-hour buttons) ─────
+        st.markdown('<div class="section-header" style="margin-top:1.5rem;">Feature Relationships (SHAP & LIME Analysis)</div>', unsafe_allow_html=True)
+        st.caption("Overview of global feature importance and local interpretability for the primary forecasting model.")
+
+        primary_bundle = bundles.get(24) or (next(iter(bundles.values())) if bundles else None)
+        if primary_bundle is not None:
+            selected_model = primary_bundle.model_name
+            reference_name = "Ridge Regression" if selected_model == "ridge" else _model_display_name(selected_model)
+            st.markdown(f"**Reference Model: {reference_name}**")
+            with st.expander(f"Feature relations reference — {reference_name}", expanded=True):
+                _render_model_explainability(primary_bundle, history, selected_model)
 
     st.markdown("""
     <p style="font-size:0.75rem;color:#334155;text-align:center;margin-top:2rem;padding-top:1rem;
     border-top:1px solid #1e2d4a;">
-        Karachi AQI Predictor · Built with Hopsworks · GitHub Actions · Streamlit ·
+        Karachi AQI Predictor · Built with Hopsworks · GitHub Actions · Streamlit · By Hamza Ali Khan
     </p>""", unsafe_allow_html=True)
 
 

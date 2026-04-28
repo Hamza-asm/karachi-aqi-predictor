@@ -4,9 +4,11 @@ numpy<2.5.0,>=1.26.3
 scikit-learn
 xgboost
 shap
+lime
 streamlit
 python-dotenv
 requests
 joblib
 plotly
 tensorflow==2.16.1
+openmeteo-requests
