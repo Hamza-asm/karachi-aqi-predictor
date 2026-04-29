@@ -6,6 +6,7 @@ xgboost
 shap
 lime
 streamlit
+streamlit-autorefresh
 python-dotenv
 requests
 joblib

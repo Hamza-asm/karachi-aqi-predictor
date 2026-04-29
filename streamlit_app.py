@@ -18,6 +18,13 @@ from dotenv import load_dotenv
 from tensorflow import keras
 
 try:
+    from streamlit_autorefresh import st_autorefresh
+    AUTREFRESH_AVAILABLE = True
+except Exception:
+    st_autorefresh = None
+    AUTREFRESH_AVAILABLE = False
+
+try:
     from lime.lime_tabular import LimeTabularExplainer
     LIME_AVAILABLE = True
 except Exception:
@@ -367,7 +374,7 @@ class ModelBundle:
     feature_cols: list[str] | None = None
 
 
-@st.cache_resource(ttl=300, show_spinner=False)
+@st.cache_resource(ttl=60, show_spinner=False)
 def _login() -> hopsworks.project.Project:
     load_dotenv()
     host = os.getenv("HOPSWORKS_HOST", "eu-west.cloud.hopsworks.ai")
@@ -379,7 +386,7 @@ def _login() -> hopsworks.project.Project:
     return hopsworks.login(host=host, api_key_value=api_key)
 
 
-@st.cache_resource(ttl=300, show_spinner=False)
+@st.cache_resource(ttl=60, show_spinner=False)
 def _load_model_bundle(_mr, horizon: int) -> ModelBundle:
     # Load the latest registered model for the horizon each call (no long-lived cache)
     registered_model = _mr.get_best_model(f"aqi_model_{horizon}h", metric="rmse", direction="min")
@@ -414,7 +421,7 @@ def _load_model_bundle(_mr, horizon: int) -> ModelBundle:
     )
 
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=30, show_spinner=False)
 def _load_history(_fs) -> pd.DataFrame:
     fg   = _fs.get_feature_group(name="aqi_features", version=1)
     data = fg.read(online=False)
@@ -807,15 +814,13 @@ def main() -> None:
             st.rerun()
     with controls_col2:
         auto = st.checkbox("Auto-refresh", value=False)
-        interval = st.selectbox("Interval (s)", [30, 60, 120, 300, 600], index=3)
+        interval = st.selectbox("Interval (s)", [30, 60, 120, 300, 600], index=1)
 
-    # If auto-refresh enabled, rerun when interval passes
     if auto:
-        last = st.session_state.get("_last_auto_refresh", 0)
-        now = time.time()
-        if now - last > interval:
-            st.session_state["_last_auto_refresh"] = now
-            st.rerun()
+        if AUTREFRESH_AVAILABLE:
+            st_autorefresh(interval=interval * 1000, key="aqi_autorefresh")
+        else:
+            st.caption("Install streamlit-autorefresh to enable timed reruns; manual refresh still works.")
 
     with st.spinner("Loading feature store history…"):
         history = _load_history(fs)
