@@ -3,7 +3,12 @@ from __future__ import annotations
 import json
 import os
 import textwrap
+import warnings
 from dataclasses import dataclass
+
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
+warnings.filterwarnings("ignore", message=r".*tf\.reset_default_graph.*")
 
 import hopsworks
 import joblib
@@ -12,7 +17,6 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import shap
-import time
 import streamlit as st
 from dotenv import load_dotenv
 from tensorflow import keras
@@ -60,6 +64,82 @@ html, body, [class*="css"] {
 /* Hide Streamlit chrome */
 #MainMenu, footer, header { visibility: hidden; }
 .block-container { padding: 2rem 2.5rem 4rem; max-width: 1400px; }
+
+/* Loading state */
+.loading-shell {
+    background: linear-gradient(180deg, rgba(17,24,39,0.96), rgba(10,14,26,0.96));
+    border: 1px solid #1e2d4a;
+    border-radius: 14px;
+    padding: 1rem 1.2rem;
+    margin-bottom: 1.25rem;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+}
+.loading-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: 0.7rem;
+}
+.loading-title {
+    font-family: 'Space Mono', monospace;
+    font-size: 0.78rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #3b82f6;
+}
+.loading-subtitle {
+    font-size: 0.8rem;
+    color: #94a3b8;
+}
+.loading-track {
+    position: relative;
+    height: 10px;
+    background: #111827;
+    border: 1px solid #1e2d4a;
+    border-radius: 999px;
+    overflow: hidden;
+}
+.loading-fill {
+    position: absolute;
+    top: 0;
+    left: -42%;
+    width: 42%;
+    height: 100%;
+    border-radius: inherit;
+    background: linear-gradient(90deg, rgba(29,78,216,0.12) 0%, #3b82f6 42%, #06b6d4 100%);
+    box-shadow: 0 0 18px rgba(59, 130, 246, 0.35);
+    animation: loadingSweep 1.25s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+.loading-dots {
+    display: inline-flex;
+    gap: 0.3rem;
+    margin-left: 0.4rem;
+}
+.loading-dots span {
+    width: 0.35rem;
+    height: 0.35rem;
+    border-radius: 999px;
+    background: #06b6d4;
+    opacity: 0.35;
+    animation: dotBounce 1.1s infinite ease-in-out;
+}
+.loading-dots span:nth-child(2) { animation-delay: 0.12s; }
+.loading-dots span:nth-child(3) { animation-delay: 0.24s; }
+@keyframes loadingPulse {
+    from { transform: scaleX(0.94); filter: brightness(0.95); }
+    to { transform: scaleX(1); filter: brightness(1.15); }
+}
+@keyframes loadingSweep {
+    0% { left: -42%; }
+    55% { left: 30%; }
+    100% { left: 110%; }
+}
+@keyframes dotBounce {
+    0%, 80%, 100% { transform: translateY(0); opacity: 0.35; }
+    40% { transform: translateY(-3px); opacity: 1; }
+}
 
 /* Header */
 .aqi-header {
@@ -331,12 +411,12 @@ CONFIDENCE_LABELS = {
 }
 
 AQI_COLORS = {
-    "Good":                             "#22c55e",
-    "Moderate":                         "#eab308",
+    "Good":                                 "#22c55e",
+    "Moderate":                             "#eab308",
     "Unhealthy for Sensitive Groups":   "#f97316",
-    "Unhealthy":                        "#ef4444",
+    "Unhealthy":                            "#ef4444",
     "Very Unhealthy":                   "#a855f7",
-    "Hazardous":                        "#dc2626",
+    "Hazardous":                            "#dc2626",
 }
 
 
@@ -364,6 +444,7 @@ def pm25_to_aqi(pm25: float | None) -> float:
 class ModelBundle:
     horizon: int
     model_name: str
+    model_version: str
     model_type: str
     metrics: dict
     all_model_metrics: dict[str, dict] | None
@@ -375,6 +456,7 @@ class ModelBundle:
 
 
 @st.cache_resource(ttl=60, show_spinner=False)
+@st.cache_resource(show_spinner=False)
 def _login() -> hopsworks.project.Project:
     load_dotenv()
     host = os.getenv("HOPSWORKS_HOST", "eu-west.cloud.hopsworks.ai")
@@ -386,10 +468,33 @@ def _login() -> hopsworks.project.Project:
     return hopsworks.login(host=host, api_key_value=api_key)
 
 
-@st.cache_resource(ttl=60, show_spinner=False)
-def _load_model_bundle(_mr, horizon: int) -> ModelBundle:
-    # Load the latest registered model for the horizon each call (no long-lived cache)
-    registered_model = _mr.get_best_model(f"aqi_model_{horizon}h", metric="rmse", direction="min")
+def _feature_store_name() -> str:
+    load_dotenv()
+    return os.getenv("HOPSWORKS_FEATURE_STORE_NAME", "aqi_khi_serverless_featurestore")
+
+
+def _latest_model_version(_mr, horizon: int) -> int:
+    """Get the LATEST version number (not the best by RMSE)."""
+    model_name = f"aqi_model_{horizon}h"
+    # Ask the registry for all models and pick the highest version for this name.
+    models = _mr.get_models(model_name)
+    versions: list[int] = []
+    for model in models or []:
+        if getattr(model, "name", None) != model_name:
+            continue
+        version = getattr(model, "version", None)
+        if version is not None:
+            versions.append(int(version))
+    if not versions:
+        raise RuntimeError(f"No versions found for {model_name}")
+    return max(versions)
+
+
+@st.cache_resource(show_spinner=False)
+def _load_model_bundle(_mr, horizon: int, model_version: int) -> ModelBundle:
+    # model_version is part of the cache key, so a new registry version refreshes the download.
+    model_name = f"aqi_model_{horizon}h"
+    registered_model = _mr.get_model(model_name, version=model_version)
     model_dir = registered_model.download()
 
     metadata_path = os.path.join(model_dir, "metadata.json")
@@ -405,6 +510,7 @@ def _load_model_bundle(_mr, horizon: int) -> ModelBundle:
     metrics       = metadata.get("metrics", {})
     all_metrics   = metadata.get("all_model_metrics", {})
 
+    # Conditionally load TF dependencies only if required
     if model_type == "tensorflow":
         model  = keras.models.load_model(os.path.join(model_dir, "model.keras"))
         scaler_path = os.path.join(model_dir, "scaler.pkl")
@@ -415,20 +521,56 @@ def _load_model_bundle(_mr, horizon: int) -> ModelBundle:
 
     return ModelBundle(
         horizon=horizon, model_name=metadata.get("model_name", f"aqi_model_{horizon}h"),
+        model_version=model_version,
         model_type=model_type, metrics=metrics, model=model, model_dir=model_dir,
         all_model_metrics=all_metrics, scaler=scaler, lookback_window=lookback,
         feature_cols=feature_cols,
     )
 
 
-@st.cache_data(ttl=30, show_spinner=False)
-def _load_history(_fs) -> pd.DataFrame:
+@st.cache_data(ttl=3600, show_spinner=False)
+def _load_history(_fs, _cache_bust: str) -> pd.DataFrame:
+    """Load AQI history, preferring the freshest online rows and falling back to offline."""
     fg   = _fs.get_feature_group(name="aqi_features", version=1)
-    data = fg.read(online=False)
+    try:
+        online_data = fg.read(online=True)
+    except Exception:
+        online_data = pd.DataFrame()
+
+    try:
+        offline_data = fg.read(online=False)
+    except Exception:
+        offline_data = pd.DataFrame()
+
+    data = online_data if not online_data.empty else offline_data
+    if not online_data.empty and not offline_data.empty:
+        online_ts = pd.to_datetime(online_data["timestamp"], utc=True).max()
+        offline_ts = pd.to_datetime(offline_data["timestamp"], utc=True).max()
+        data = online_data if online_ts >= offline_ts else offline_data
+
     data["timestamp"] = pd.to_datetime(data["timestamp"], utc=True)
     data = data.sort_values("timestamp").reset_index(drop=True)
     data = data[data["aqi"].notna()].copy()
     return prepare_prediction_frame(data)
+
+
+def _loading_state_html(step: str, percent: int, detail: str) -> str:
+    percent = max(0, min(100, percent))
+    return f"""
+    <div class="loading-shell">
+        <div class="loading-row">
+            <div>
+                <div class="loading-title">Loading dashboard</div>
+                <div class="loading-subtitle">{step}<span class="loading-dots"><span></span><span></span><span></span></span></div>
+            </div>
+            <div class="loading-subtitle">{percent}%</div>
+        </div>
+        <div class="loading-track">
+            <div class="loading-fill" style="width:{percent}%;"></div>
+        </div>
+        <div class="loading-subtitle" style="margin-top:0.65rem;">{detail}</div>
+    </div>
+    """
 
 
 def _predict(bundle: ModelBundle, history: pd.DataFrame) -> float:
@@ -622,7 +764,7 @@ def _model_buttons(bundle: ModelBundle, comparison_frame: pd.DataFrame, ui_prefi
                 label,
                 key=f"{ui_prefix}_{state_key}_{model_name}",
                 type="primary" if model_name == selected_model else "secondary",
-                use_container_width=True,
+                use_full_width=True,
             ):
                 st.session_state[state_key] = model_name
                 st.rerun()
@@ -655,7 +797,7 @@ def _render_metric_matrix(bundle: ModelBundle, selected_model: str) -> None:
     with summary_cols[2]:
         st.metric("R²", _fmt_metric(selected_row["r2"]))
 
-    st.plotly_chart(_comparison_chart(comparison_frame, selected_model), use_container_width=True)
+    st.plotly_chart(_comparison_chart(comparison_frame, selected_model), width='stretch')
 
     st.dataframe(
         comparison_frame[["label", "rmse", "mae", "r2"]].rename(
@@ -701,7 +843,7 @@ def _render_model_explainability(bundle: ModelBundle, history: pd.DataFrame, sel
                 xaxis=dict(gridcolor="#1e2d4a", zeroline=False, tickfont=dict(size=11)),
                 yaxis=dict(gridcolor="rgba(0,0,0,0)", tickfont=dict(size=12, color="#e2e8f0"), autorange="reversed"),
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width='stretch')
 
     with right:
         st.markdown("**LIME**")
@@ -728,7 +870,7 @@ def _render_model_explainability(bundle: ModelBundle, history: pd.DataFrame, sel
                 xaxis=dict(gridcolor="#1e2d4a", zeroline=False, tickfont=dict(size=11)),
                 yaxis=dict(gridcolor="rgba(0,0,0,0)", tickfont=dict(size=12, color="#e2e8f0"), autorange="reversed"),
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width='stretch')
 
 
 def _eda_feature_overview(history: pd.DataFrame, max_features: int = 6) -> None:
@@ -750,7 +892,7 @@ def _eda_feature_overview(history: pd.DataFrame, max_features: int = 6) -> None:
         )
         fig.update_xaxes(title_text=feat, row=r, col=c)
     fig.update_layout(height=220 * rows, margin=dict(t=30, b=10, l=0, r=0), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
 
 
 def _eda_corr_heatmap(history: pd.DataFrame, max_features: int = 12) -> None:
@@ -767,7 +909,7 @@ def _eda_corr_heatmap(history: pd.DataFrame, max_features: int = 12) -> None:
         colorbar=dict(title="corr", tickfont=dict(color="#94a3b8")),
     ))
     fig.update_layout(height=480, margin=dict(t=10, b=10, l=10, r=10), paper_bgcolor="rgba(0,0,0,0)")
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
 
 
 def _eda_scatter_matrix(history: pd.DataFrame, features: list[str] | None = None) -> None:
@@ -784,7 +926,7 @@ def _eda_scatter_matrix(history: pd.DataFrame, features: list[str] | None = None
     fig = px.scatter_matrix(sample, dimensions=features, color_discrete_sequence=["#06b6d4"]) 
     fig.update_traces(diagonal_visible=False)
     fig.update_layout(height=600, margin=dict(t=30, b=10, l=0, r=0), paper_bgcolor="rgba(0,0,0,0)")
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
@@ -801,16 +943,37 @@ def main() -> None:
     </div>
     """, unsafe_allow_html=True)
 
+    loading_slot = st.empty()
+    loading_slot.markdown(
+        _loading_state_html(
+            "Connecting to Hopsworks",
+            12,
+            "Authenticating and preparing the dashboard",
+        ),
+        unsafe_allow_html=True,
+    )
+
     # ── Load data ─────────────────────────────────────────────────────────────
     with st.spinner("Connecting to Hopsworks…"):
         project = _login()
-        fs      = project.get_feature_store()
+        fs      = project.get_feature_store(name=_feature_store_name())
         mr      = project.get_model_registry()
+
+    loading_slot.markdown(
+        _loading_state_html(
+            "Connected to Hopsworks",
+            35,
+            "Reading feature store history and model registry",
+        ),
+        unsafe_allow_html=True,
+    )
 
     # --- Live controls: manual refresh and optional auto-refresh ---
     controls_col1, controls_col2 = st.columns([1, 3])
     with controls_col1:
         if st.button("Refresh now"):
+            _load_history.clear()
+            _load_model_bundle.clear()
             st.rerun()
     with controls_col2:
         auto = st.checkbox("Auto-refresh", value=False)
@@ -823,9 +986,21 @@ def main() -> None:
             st.caption("Install streamlit-autorefresh to enable timed reruns; manual refresh still works.")
 
     with st.spinner("Loading feature store history…"):
-        history = _load_history(fs)
+        # Fix 2: Cache Busting with Current Hour
+        current_hour = pd.Timestamp.now(tz="UTC").strftime("%Y-%m-%d-%H")
+        history = _load_history(fs, current_hour)
+
+    loading_slot.markdown(
+        _loading_state_html(
+            "Feature history loaded",
+            62,
+            "Loading the latest model bundle and forecast output",
+        ),
+        unsafe_allow_html=True,
+    )
 
     if history.empty:
+        loading_slot.empty()
         st.error("No real AQICN rows are available yet. Run the feature pipeline first.")
         return
 
@@ -835,18 +1010,30 @@ def main() -> None:
 
     for horizon in [24, 48, 72]:
         try:
-            b = _load_model_bundle(mr, horizon)
+            model_version = _latest_model_version(mr, horizon)
+            b = _load_model_bundle(mr, horizon, model_version)
             bundles[horizon]     = b
             predictions[horizon] = _predict(b, history)
         except Exception as exc:
+            loading_slot.empty()
             st.error(f"Failed to load {horizon}h model: {exc}")
             return
+
+    loading_slot.markdown(
+        _loading_state_html(
+            "Dashboard ready",
+            100,
+            "Rendering forecast cards, trend chart, and model comparison",
+        ),
+        unsafe_allow_html=True,
+    )
 
     current_source = float(history["pm25"].iloc[-1]) if "pm25" in history.columns else float(history["aqi"].iloc[-1])
     current_aqi   = _display_aqi_value(current_source)
     display_predictions = {horizon: _display_aqi_value(value) for horizon, value in predictions.items()}
     current_label, current_color = aqi_category(current_aqi)
-    latest_ts     = history["timestamp"].iloc[-1].strftime("%Y-%m-%d %H:%M UTC")
+    latest_ts_utc = history["timestamp"].iloc[-1]
+    latest_ts     = latest_ts_utc.tz_convert("Asia/Karachi").strftime("%Y-%m-%d %I:%M %p PKT")
     any_alert     = any(v > 150 for v in display_predictions.values())
 
     # ── Alert banner ──────────────────────────────────────────────────────────
@@ -879,6 +1066,7 @@ def main() -> None:
                 {bundles[24].model_name.upper()}
             </div>
             <div class="kpi-sub">Selected by lowest RMSE</div>
+            <div class="kpi-sub">Registry version: {bundles[24].model_version}</div>
         </div>
         <div class="kpi-card">
             <div class="kpi-label">Training rows</div>
@@ -893,7 +1081,10 @@ def main() -> None:
     </div>
     """, unsafe_allow_html=True)
 
+    # Fix 3: Scoped Tabs
     forecast_tab, comparison_tab, eda_tab = st.tabs(["Forecast", "Model Comparison", "EDA"])
+
+    loading_slot.empty()
 
     with forecast_tab:
         st.markdown('<div class="section-header">72-Hour Forecast</div>', unsafe_allow_html=True)
@@ -919,18 +1110,19 @@ def main() -> None:
 
         st.markdown('<div class="section-header">Recent AQI Trend (72h)</div>', unsafe_allow_html=True)
         trend = history.tail(72).copy()
+        trend["timestamp_local"] = trend["timestamp"].dt.tz_convert("Asia/Karachi")
         trend["display_aqi"] = trend["pm25"].apply(pm25_to_aqi) if "pm25" in trend.columns else trend["aqi"]
         fig   = go.Figure()
         fig.add_trace(go.Scatter(
-            x=trend["timestamp"], y=trend["display_aqi"],
+            x=trend["timestamp_local"], y=trend["display_aqi"],
             mode="lines",
             line=dict(color="#3b82f6", width=2.5, shape="spline", smoothing=0.8),
             fill="tozeroy",
             fillcolor="rgba(59,130,246,0.08)",
             name="AQI",
-            hovertemplate="<b>%{x|%b %d %H:%M}</b><br>AQI: %{y:.1f}<extra></extra>",
+            hovertemplate="<b>%{x|%b %d %I:%M %p PKT}</b><br>AQI: %{y:.1f}<extra></extra>",
         ))
-        last_ts  = trend["timestamp"].iloc[-1]
+        last_ts  = trend["timestamp_local"].iloc[-1]
         for horizon, pred in predictions.items():
             display_pred = display_predictions[horizon]
             fig.add_trace(go.Scatter(
@@ -951,7 +1143,7 @@ def main() -> None:
             margin=dict(l=0, r=0, t=10, b=0),
             height=280,
             showlegend=False,
-            xaxis=dict(gridcolor="#1e2d4a", zeroline=False, tickformat="%b %d %H:%M", tickfont=dict(size=11)),
+            xaxis=dict(gridcolor="#1e2d4a", zeroline=False, tickformat="%b %d %I:%M %p", tickfont=dict(size=11)),
             yaxis=dict(
                 gridcolor="#1e2d4a", zeroline=False,
                 tickfont=dict(size=11),
@@ -959,7 +1151,7 @@ def main() -> None:
             ),
             hovermode="x unified",
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
     with comparison_tab:
         st.markdown('<div class="section-header">Model Comparison</div>', unsafe_allow_html=True)
@@ -1167,7 +1359,7 @@ def main() -> None:
                 xaxis=dict(title="PM2.5 (µg/m³)", gridcolor="#1e2d4a", zeroline=False),
                 yaxis=dict(title="AQI", gridcolor="#1e2d4a", zeroline=False),
             )
-            st.plotly_chart(fig_scatter, use_container_width=True)
+            st.plotly_chart(fig_scatter, width='stretch')
             st.caption(f"Correlation: {pm25_corr:.3f} — PM2.5 is the strongest single predictor of AQI in Karachi.")
 
         # Chart 2: Hourly AQI pattern
@@ -1214,7 +1406,7 @@ def main() -> None:
                 ),
                 yaxis=dict(title="Mean AQI", gridcolor="#1e2d4a", zeroline=False),
             )
-            st.plotly_chart(fig_hour, use_container_width=True)
+            st.plotly_chart(fig_hour, width='stretch')
             st.caption(f"Peak pollution at {peak_hour}:00 UTC, cleanest air at {clean_hour}:00 UTC. Shaded band = ±1 std dev.")
 
         # ── Chart 3 & 4 side by side ──────────────────────────────────────────
@@ -1263,7 +1455,7 @@ def main() -> None:
                 yaxis=dict(title="Mean AQI", gridcolor="#1e2d4a", zeroline=False),
                 bargap=0.25,
             )
-            st.plotly_chart(fig_monthly, use_container_width=True)
+            st.plotly_chart(fig_monthly, width='stretch')
             worst_month = monthly.loc[monthly["aqi"].idxmax(), "period_str"]
             best_month  = monthly.loc[monthly["aqi"].idxmin(), "period_str"]
             st.caption(f"Worst month: {worst_month} ({monthly['aqi'].max():.1f}) · Best month: {best_month} ({monthly['aqi'].min():.1f}). Color = AQI category.")
@@ -1315,10 +1507,10 @@ def main() -> None:
                 ),
                 hovermode="x unified",
             )
-            st.plotly_chart(fig_history, use_container_width=True)
+            st.plotly_chart(fig_history, width='stretch')
             st.caption(f"Daily averages smoothed for clarity. Dotted lines = US EPA AQI category thresholds.")
 
-        # ── SHAP + LIME feature relationships (single view, no per-hour buttons) ─────
+        # ── SHAP + LIME feature relationships ─────
         st.markdown('<div class="section-header" style="margin-top:1.5rem;">Feature Relationships (SHAP & LIME Analysis)</div>', unsafe_allow_html=True)
         st.caption("Overview of global feature importance and local interpretability for the primary forecasting model.")
 

@@ -54,8 +54,8 @@ def fetch_aqicn_current(city: str, api_key: str) -> pd.DataFrame:
     raw_ts = data.get("time", {}).get("iso")
     now = datetime.now(timezone.utc)
     ts = pd.to_datetime(raw_ts, utc=True).to_pydatetime() if raw_ts else now
-    if ts < now - timedelta(days=2):
-        logging.warning("AQICN timestamp %s looks stale; using current UTC time instead", ts)
+    if ts < now - timedelta(hours=2) or ts > now + timedelta(hours=1):
+        logging.warning("AQICN timestamp %s is outside expected window; using current UTC time instead", ts)
         ts = now
     ts = ts.replace(minute=0, second=0, microsecond=0)
 
@@ -186,7 +186,8 @@ def main() -> None:
 
     # ── Step 1: connect Hopsworks early so we have a fallback if AQICN fails ──
     project = hopsworks.login(host=host, api_key_value=hopsworks_api_key)
-    fs      = project.get_feature_store()
+    feature_store_name = os.getenv("HOPSWORKS_FEATURE_STORE_NAME", "aqi_khi_serverless_featurestore")
+    fs      = project.get_feature_store(name=feature_store_name)
     history = load_history(fs)
 
     # ── Step 2: fetch current AQI from AQICN ──────────────────────────────────

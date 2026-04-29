@@ -4,7 +4,12 @@ import json
 import logging
 import os
 import tempfile
+import warnings
 from dataclasses import dataclass
+
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
+warnings.filterwarnings("ignore", message=r".*tf\.reset_default_graph.*")
 
 import hopsworks
 import joblib
@@ -347,7 +352,8 @@ def main() -> None:
         raise RuntimeError("HOPSWORKS_API_KEY is missing")
 
     project = hopsworks.login(host=host, api_key_value=api_key)
-    fs      = project.get_feature_store()
+    feature_store_name = os.getenv("HOPSWORKS_FEATURE_STORE_NAME", "aqi_khi_serverless_featurestore")
+    fs      = project.get_feature_store(name=feature_store_name)
 
     # Load and filter data
     fg  = fs.get_feature_group(name="aqi_features", version=1)
