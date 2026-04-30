@@ -39,6 +39,7 @@ from aqi_feature_utils import (
     aqi_category,
     feature_columns,
     prepare_prediction_frame,
+    pm25_to_aqi,
 )
 
 # ── Page config ────────────────────────────────────────────────────────────────
@@ -420,25 +421,6 @@ AQI_COLORS = {
 }
 
 
-def pm25_to_aqi(pm25: float | None) -> float:
-    """Convert PM2.5 concentration to the US EPA AQI scale."""
-    if pm25 is None or pd.isna(pm25):
-        return float("nan")
-    if pm25 < 0:
-        return 0.0
-    if pm25 <= 12.0:
-        return ((50 - 0) / (12.0 - 0)) * (pm25 - 0) + 0
-    if pm25 <= 35.4:
-        return ((100 - 51) / (35.4 - 12.1)) * (pm25 - 12.1) + 51
-    if pm25 <= 55.4:
-        return ((150 - 101) / (55.4 - 35.5)) * (pm25 - 35.5) + 101
-    if pm25 <= 150.4:
-        return ((200 - 151) / (150.4 - 55.5)) * (pm25 - 55.5) + 151
-    if pm25 <= 250.4:
-        return ((300 - 201) / (250.4 - 150.5)) * (pm25 - 150.5) + 201
-    return 301.0
-
-
 # ── Data classes & helpers ─────────────────────────────────────────────────────
 @dataclass
 class ModelBundle:
@@ -530,27 +512,49 @@ def _load_model_bundle(_mr, horizon: int, model_version: int) -> ModelBundle:
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def _load_history(_fs, _cache_bust: str) -> pd.DataFrame:
-    """Load AQI history, preferring the freshest online rows and falling back to offline."""
-    fg   = _fs.get_feature_group(name="aqi_features", version=1)
+    """Load AQI history, merging online and offline rows for full coverage."""
+    fg = _fs.get_feature_group(name="aqi_features", version=1)
+    
+    online_data = pd.DataFrame()
+    offline_data = pd.DataFrame()
+
     try:
+        # Online store gives the absolute latest row
         online_data = fg.read(online=True)
-    except Exception:
-        online_data = pd.DataFrame()
+    except Exception as e:
+        st.sidebar.warning(f"Note: Online store unavailable ({e}).")
 
     try:
+        # Offline store gives the bulk of the history
         offline_data = fg.read(online=False)
-    except Exception:
-        offline_data = pd.DataFrame()
+    except Exception as e:
+        st.sidebar.error(f"Error: Offline store read failed ({e}).")
 
-    data = online_data if not online_data.empty else offline_data
-    if not online_data.empty and not offline_data.empty:
-        online_ts = pd.to_datetime(online_data["timestamp"], utc=True).max()
-        offline_ts = pd.to_datetime(offline_data["timestamp"], utc=True).max()
-        data = online_data if online_ts >= offline_ts else offline_data
+    # Debug info for the user to see raw counts
+    with st.sidebar.expander("🔍 Data Diagnostics", expanded=False):
+        st.write(f"Raw Online Rows: {len(online_data)}")
+        if not online_data.empty:
+            st.write(f"Latest Online: {pd.to_datetime(online_data['timestamp'], utc=True).max()}")
+        st.write(f"Raw Offline Rows: {len(offline_data)}")
+        if not offline_data.empty:
+            st.write(f"Latest Offline: {pd.to_datetime(offline_data['timestamp'], utc=True).max()}")
 
+    if online_data.empty and offline_data.empty:
+        return pd.DataFrame()
+
+    # Merge and deduplicate to get the most complete and fresh picture
+    data = pd.concat([online_data, offline_data], ignore_index=True)
     data["timestamp"] = pd.to_datetime(data["timestamp"], utc=True)
-    data = data.sort_values("timestamp").reset_index(drop=True)
+    
+    # Ensure sorting and remove duplicates, keeping the most recent entry for any given timestamp
+    data = data.sort_values("timestamp").drop_duplicates(subset=["timestamp"], keep="last").reset_index(drop=True)
+    
+    # Filter for rows that have an AQI label (real AQICN data)
     data = data[data["aqi"].notna()].copy()
+    
+    if data.empty:
+        return pd.DataFrame()
+
     return prepare_prediction_frame(data)
 
 
@@ -1028,9 +1032,8 @@ def main() -> None:
         unsafe_allow_html=True,
     )
 
-    current_source = float(history["pm25"].iloc[-1]) if "pm25" in history.columns else float(history["aqi"].iloc[-1])
-    current_aqi   = _display_aqi_value(current_source)
-    display_predictions = {horizon: _display_aqi_value(value) for horizon, value in predictions.items()}
+    current_aqi   = float(history["aqi"].iloc[-1])
+    display_predictions = {horizon: float(value) for horizon, value in predictions.items()}
     current_label, current_color = aqi_category(current_aqi)
     latest_ts_utc = history["timestamp"].iloc[-1]
     latest_ts     = latest_ts_utc.tz_convert("Asia/Karachi").strftime("%Y-%m-%d %I:%M %p PKT")
@@ -1178,9 +1181,9 @@ def main() -> None:
     with eda_tab:
         st.markdown('<div class="section-header">Exploratory Data Analysis</div>', unsafe_allow_html=True)
 
-        # ── Compute EDA stats from real data ──────────────────────────────────
+        # ── Compute EDA stats from real data (converted to Local Time) ─────────
         eda_df = history.copy()
-        eda_df["timestamp"] = pd.to_datetime(eda_df["timestamp"], utc=True)
+        eda_df["timestamp"] = pd.to_datetime(eda_df["timestamp"], utc=True).dt.tz_convert("Asia/Karachi")
         eda_df["hour"]  = eda_df["timestamp"].dt.hour
         eda_df["month"] = eda_df["timestamp"].dt.month
         eda_df["month_name"] = eda_df["timestamp"].dt.strftime("%b %Y")

@@ -39,6 +39,30 @@ FEATURE_COLUMNS = [
 ]
 
 
+def pm25_to_aqi(pm25: float | None) -> float:
+    """Convert PM2.5 concentration (µg/m³) to the US EPA AQI scale."""
+    if pm25 is None or pd.isna(pm25):
+        return float("nan")
+    pm25 = float(pm25)
+    if pm25 < 0:
+        return 0.0
+    if pm25 <= 12.0:
+        return ((50 - 0) / (12.0 - 0)) * (pm25 - 0) + 0
+    if pm25 <= 35.4:
+        return ((100 - 51) / (35.4 - 12.1)) * (pm25 - 12.1) + 51
+    if pm25 <= 55.4:
+        return ((150 - 101) / (55.4 - 35.5)) * (pm25 - 35.5) + 101
+    if pm25 <= 150.4:
+        return ((200 - 151) / (150.4 - 55.5)) * (pm25 - 55.5) + 151
+    if pm25 <= 250.4:
+        return ((300 - 201) / (250.4 - 150.5)) * (pm25 - 150.5) + 201
+    if pm25 <= 350.4:
+        return ((400 - 301) / (350.4 - 250.5)) * (pm25 - 250.5) + 301
+    if pm25 <= 500.4:
+        return ((500 - 401) / (500.4 - 350.5)) * (pm25 - 350.5) + 401
+    return 501.0
+
+
 def aqi_category(aqi: float) -> tuple[str, str]:
     if aqi <= 50:
         return "Good", "#00e400"
@@ -80,10 +104,10 @@ def add_engineered_features(df: pd.DataFrame) -> pd.DataFrame:
         data["aqi_lag_6h"] = data["aqi"].shift(6)
         data["aqi_lag_12h"] = data["aqi"].shift(12)
         data["aqi_lag_24h"] = data["aqi"].shift(24)
-        data["rolling_mean_6h"] = data["aqi"].rolling(window=6, min_periods=6).mean()
-        data["rolling_mean_24h"] = data["aqi"].rolling(window=24, min_periods=24).mean()
-        data["rolling_std_6h"] = data["aqi"].rolling(window=6, min_periods=6).std()
-        data["rolling_std_24h"] = data["aqi"].rolling(window=24, min_periods=24).std()
+        data["rolling_mean_6h"] = data["aqi"].rolling(window=6, min_periods=1).mean()
+        data["rolling_mean_24h"] = data["aqi"].rolling(window=24, min_periods=1).mean()
+        data["rolling_std_6h"] = data["aqi"].rolling(window=6, min_periods=1).std()
+        data["rolling_std_24h"] = data["aqi"].rolling(window=24, min_periods=1).std()
     else:
         for column in [
             "aqi_lag_1h",
@@ -109,7 +133,11 @@ def build_training_frame(df: pd.DataFrame, horizon_hours: int) -> pd.DataFrame:
 
 def prepare_prediction_frame(df: pd.DataFrame) -> pd.DataFrame:
     data = add_engineered_features(df)
-    return data.dropna(subset=FEATURE_COLUMNS).reset_index(drop=True)
+    # The training pipeline uses ffill().fillna(0) on feature columns to be robust to missing values.
+    # We apply the same logic here to ensure the latest rows are not dropped if some pollutants are missing.
+    cols = [c for c in FEATURE_COLUMNS if c in data.columns]
+    data[cols] = data[cols].ffill().fillna(0)
+    return data.reset_index(drop=True)
 
 
 def build_feature_row_for_insert(history: pd.DataFrame, current_row: pd.DataFrame) -> pd.DataFrame:

@@ -10,7 +10,7 @@ import pandas as pd
 import requests
 from dotenv import load_dotenv
 
-from aqi_feature_utils import add_engineered_features
+from aqi_feature_utils import add_engineered_features, pm25_to_aqi
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -190,7 +190,8 @@ def build_backfill_dataset(
         data[col] = pd.to_numeric(data[col], errors="coerce").astype(float)
 
     # Use PM2.5 as the historical AQI proxy so model training has labels.
-    data["aqi"] = pd.to_numeric(data["pm25"], errors="coerce").astype(float)
+    # We convert the concentration (µg/m³) to the US EPA AQI scale for consistency.
+    data["aqi"] = data["pm25"].apply(pm25_to_aqi)
 
     # Add time features + lag + rolling
     data = add_engineered_features(data)

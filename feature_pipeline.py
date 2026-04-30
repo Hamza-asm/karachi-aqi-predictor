@@ -53,7 +53,19 @@ def fetch_aqicn_current(city: str, api_key: str) -> pd.DataFrame:
 
     raw_ts = data.get("time", {}).get("iso")
     now = datetime.now(timezone.utc)
-    ts = pd.to_datetime(raw_ts, utc=True).to_pydatetime() if raw_ts else now
+    if raw_ts:
+        # If the API returns a naive string, assume it's Karachi time (UTC+5)
+        # pd.to_datetime(..., utc=True) on a naive string assumes it's UTC.
+        # We should localize first if it's naive.
+        ts_parsed = pd.to_datetime(raw_ts)
+        if ts_parsed.tzinfo is None:
+            ts = ts_parsed.tz_localize("Asia/Karachi").tz_convert("UTC")
+        else:
+            ts = ts_parsed.tz_convert("UTC")
+        ts = ts.to_pydatetime()
+    else:
+        ts = now
+
     if ts < now - timedelta(hours=2) or ts > now + timedelta(hours=1):
         logging.warning("AQICN timestamp %s is outside expected window; using current UTC time instead", ts)
         ts = now
