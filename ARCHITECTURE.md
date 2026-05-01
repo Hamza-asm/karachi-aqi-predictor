@@ -18,7 +18,7 @@ An end-to-end, fully serverless ML system that predicts Karachi's Air Quality In
 
 | Layer           | Technology                              | Purpose                               |
 | --------------- | --------------------------------------- | ------------------------------------- |
-| Data source     | AQICN API / OpenWeatherMap API          | Raw AQI + weather data for Karachi    |
+| Data source     | Open-Meteo / OpenWeatherMap API        | Raw AQI + weather data for Karachi    |
 | Feature store   | Hopsworks (free tier)                   | Store, version, and serve ML features |
 | Model registry  | Hopsworks Model Registry                | Store trained model versions          |
 | ML models       | Scikit-learn, XGBoost, TensorFlow/Keras | Random Forest, Ridge Regression, LSTM |

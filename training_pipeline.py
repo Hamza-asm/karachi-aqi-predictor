@@ -363,7 +363,7 @@ def main() -> None:
     raw["timestamp"] = pd.to_datetime(raw["timestamp"], utc=True)
     raw = raw.sort_values("timestamp").reset_index(drop=True)
 
-    # Keep only real AQICN rows (aqi not null) after start date
+    # Keep only real AQI rows (Open-Meteo source) (aqi not null) after start date
     filtered = raw[
         (raw["timestamp"] >= pd.Timestamp(train_start_date, tz="UTC")) &
         (raw["aqi"].notna())

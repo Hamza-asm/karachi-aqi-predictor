@@ -5,11 +5,6 @@ import os
 import textwrap
 import warnings
 from dataclasses import dataclass
-
-os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
-os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
-warnings.filterwarnings("ignore", message=r".*tf\.reset_default_graph.*")
-
 import hopsworks
 import joblib
 import numpy as np
@@ -19,7 +14,6 @@ from plotly.subplots import make_subplots
 import shap
 import streamlit as st
 from dotenv import load_dotenv
-from tensorflow import keras
 
 try:
     from streamlit_autorefresh import st_autorefresh
@@ -437,7 +431,6 @@ class ModelBundle:
     feature_cols: list[str] | None = None
 
 
-@st.cache_resource(ttl=60, show_spinner=False)
 @st.cache_resource(show_spinner=False)
 def _login() -> hopsworks.project.Project:
     load_dotenv()
@@ -494,6 +487,7 @@ def _load_model_bundle(_mr, horizon: int, model_version: int) -> ModelBundle:
 
     # Conditionally load TF dependencies only if required
     if model_type == "tensorflow":
+        from tensorflow import keras
         model  = keras.models.load_model(os.path.join(model_dir, "model.keras"))
         scaler_path = os.path.join(model_dir, "scaler.pkl")
         scaler = joblib.load(scaler_path) if os.path.exists(scaler_path) else None
@@ -549,7 +543,7 @@ def _load_history(_fs, _cache_bust: str) -> pd.DataFrame:
     # Ensure sorting and remove duplicates, keeping the most recent entry for any given timestamp
     data = data.sort_values("timestamp").drop_duplicates(subset=["timestamp"], keep="last").reset_index(drop=True)
     
-    # Filter for rows that have an AQI label (real AQICN data)
+    # Filter for rows that have an AQI label (real AQI data)
     data = data[data["aqi"].notna()].copy()
     
     if data.empty:
@@ -941,7 +935,7 @@ def main() -> None:
     <div class="aqi-header">
         <div>
             <div class="aqi-title">☁️ Karachi AQI Predictor</div>
-            <div class="aqi-subtitle">Real-time forecasting · AQICN data · Hopsworks feature store</div>
+            <div class="aqi-subtitle">Real-time forecasting · Open-Meteo data · Hopsworks feature store</div>
         </div>
         <div class="aqi-attribution">Designed &amp; Developed by Hamza Ali Khan</div>
     </div>
@@ -1005,7 +999,7 @@ def main() -> None:
 
     if history.empty:
         loading_slot.empty()
-        st.error("No real AQICN rows are available yet. Run the feature pipeline first.")
+        st.error("No real AQI rows are available yet. Run the feature pipeline first.")
         return
 
     # ── Load models & predict (always fetch latest model during each run) ─────
@@ -1036,6 +1030,10 @@ def main() -> None:
     display_predictions = {horizon: float(value) for horizon, value in predictions.items()}
     current_label, current_color = aqi_category(current_aqi)
     latest_ts_utc = history["timestamp"].iloc[-1]
+    # Clamp displayed timestamp so the dashboard never shows a future time
+    now_utc = pd.Timestamp.now(tz="UTC")
+    if latest_ts_utc > now_utc:
+        latest_ts_utc = now_utc
     latest_ts     = latest_ts_utc.tz_convert("Asia/Karachi").strftime("%Y-%m-%d %I:%M %p PKT")
     any_alert     = any(v > 150 for v in display_predictions.values())
 
@@ -1074,7 +1072,7 @@ def main() -> None:
         <div class="kpi-card">
             <div class="kpi-label">Training rows</div>
             <div class="kpi-value">{len(history):,}</div>
-            <div class="kpi-sub">Clean AQICN-only labels</div>
+            <div class="kpi-sub">Clean Open-Meteo-only labels</div>
         </div>
         <div class="kpi-card">
             <div class="kpi-label">Last updated</div>
@@ -1238,7 +1236,7 @@ def main() -> None:
                     <div style="font-size:0.7rem;color:#64748b;text-transform:uppercase;
                                 letter-spacing:0.06em;margin-bottom:0.3rem;">Data Source</div>
                     <div style="font-family:'Space Mono',monospace;font-size:0.85rem;
-                                font-weight:700;color:#f0f6ff;">AQICN API</div>
+                                font-weight:700;color:#f0f6ff;">Open-Meteo API</div>
                     <div style="font-size:0.72rem;color:#475569;">US EPA AQI standard</div>
                 </div>
             </div>
@@ -1313,8 +1311,7 @@ def main() -> None:
                 PM2.5 as the dominant AQI driver. Air quality peaks at hour
                 <b style="color:#ef4444;">{peak_hour}:00</b> and is cleanest around
                 <b style="color:#22c55e;">{clean_hour}:00</b> on average.
-                Note: Values follow the <b style="color:#e2e8f0;">US EPA AQI standard</b> via AQICN —
-                different from the European EAQI shown on Open-Meteo and similar sites.
+                Note: Values follow the <b style="color:#e2e8f0;">US EPA AQI standard</b>; data sourced from Open-Meteo.
             </div>
         </div>
         """)

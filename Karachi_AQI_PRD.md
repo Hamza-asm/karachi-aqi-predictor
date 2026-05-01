@@ -45,7 +45,7 @@ Existing AQI dashboards show real-time values but provide no forward-looking pre
 
 | **Layer**      | **Technology**                    | **Reason**                                                  |
 | -------------- | --------------------------------- | ----------------------------------------------------------- |
-| Data ingestion | AQICN API / OpenWeatherMap        | Free tier, covers Karachi, includes pollutants + weather    |
+| Data ingestion | Open-Meteo / OpenWeatherMap        | Free tier, covers Karachi, includes pollutants + weather    |
 | Feature store  | Hopsworks (free tier)             | Serverless, versioned feature groups, Python SDK            |
 | Model registry | Hopsworks Model Registry          | Paired with feature store, stores model artifacts + metrics |
 | ML models      | Scikit-learn, XGBoost, TensorFlow | Random Forest, Ridge Regression, LSTM                       |
@@ -184,7 +184,7 @@ GitHub Actions is used as the serverless scheduler. No Airflow, no Docker, no lo
 | **Variable**          | **Where to set**              | **Description**                            |
 | --------------------- | ----------------------------- | ------------------------------------------ |
 | `HOPSWORKS_API_KEY`   | GitHub Secrets + local `.env` | Hopsworks project API key                  |
-| `AQICN_API_KEY`       | GitHub Secrets + local `.env` | AQICN data API key (free at aqicn.org/api) |
+| `AQICN_API_KEY`       | (removed)                     | AQICN is no longer used; replaced by Open-Meteo (no API key) |
 | `OPENWEATHER_API_KEY` | GitHub Secrets + local `.env` | OpenWeatherMap key (optional fallback)     |
 
 ---
@@ -192,8 +192,8 @@ GitHub Actions is used as the serverless scheduler. No Airflow, no Docker, no lo
 # 11. Deployment Checklist
 
 - [ ] Create Hopsworks free account at app.hopsworks.ai and get API key
-- [ ] Register for AQICN API key at aqicn.org/api (free)
-- [ ] Add `HOPSWORKS_API_KEY` and `AQICN_API_KEY` to GitHub Secrets
+- [ ] (no AQICN key required anymore — using Open-Meteo)
+- [ ] Add `HOPSWORKS_API_KEY` to GitHub Secrets
 - [ ] Run `backfill_pipeline.py` once manually to populate 6 months of historical features
 - [ ] Run `training_pipeline.py` once manually to create first model version
 - [ ] Enable both GitHub Actions workflows
