@@ -1043,7 +1043,7 @@ def main() -> None:
         st.markdown(f"""
         <div class="alert-danger">
             <span style="font-size:1.4rem">⚠️</span>
-            <span>Hazardous AQI predicted for: {', '.join(bad_horizons)}.
+            <span>Unhealthy AQI levels predicted for: {', '.join(bad_horizons)}.
             Sensitive groups should avoid outdoor activity.</span>
         </div>""", unsafe_allow_html=True)
     else:
