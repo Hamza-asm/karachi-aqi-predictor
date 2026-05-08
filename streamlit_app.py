@@ -508,7 +508,7 @@ def _load_model_bundle(_mr, horizon: int, model_version: int) -> ModelBundle:
 def _load_history(_fs, _cache_bust: str) -> pd.DataFrame:
     """Load AQI history from the online feature store."""
     fg = _fs.get_feature_group(name="aqi_features", version=1)
-    
+    online_data = pd.DataFrame()
 
     try:
         # Online store gives the absolute latest row
@@ -522,7 +522,21 @@ def _load_history(_fs, _cache_bust: str) -> pd.DataFrame:
             st.write(f"Latest Online: {pd.to_datetime(online_data['timestamp'], utc=True).max()}")
 
     if online_data.empty:
-        return pd.DataFrame()
+        try:
+            offline_data = fg.read(online=False)
+        except Exception as e:
+            st.sidebar.error(f"Error: Offline store read failed ({e}).")
+            return pd.DataFrame()
+
+        if offline_data.empty:
+            return pd.DataFrame()
+
+        offline_data["timestamp"] = pd.to_datetime(offline_data["timestamp"], utc=True)
+        offline_data = offline_data.sort_values("timestamp").drop_duplicates(subset=["timestamp"], keep="last").reset_index(drop=True)
+        offline_data = offline_data[offline_data["aqi"].notna()].copy()
+        if offline_data.empty:
+            return pd.DataFrame()
+        return prepare_prediction_frame(offline_data)
 
     online_data["timestamp"] = pd.to_datetime(online_data["timestamp"], utc=True)
     online_data = online_data.sort_values("timestamp").drop_duplicates(subset=["timestamp"], keep="last").reset_index(drop=True)
