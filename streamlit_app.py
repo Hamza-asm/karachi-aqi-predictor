@@ -506,11 +506,9 @@ def _load_model_bundle(_mr, horizon: int, model_version: int) -> ModelBundle:
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def _load_history(_fs, _cache_bust: str) -> pd.DataFrame:
-    """Load AQI history, merging online and offline rows for full coverage."""
+    """Load AQI history from the online feature store."""
     fg = _fs.get_feature_group(name="aqi_features", version=1)
     
-    online_data = pd.DataFrame()
-    offline_data = pd.DataFrame()
 
     try:
         # Online store gives the absolute latest row
@@ -518,38 +516,22 @@ def _load_history(_fs, _cache_bust: str) -> pd.DataFrame:
     except Exception as e:
         st.sidebar.warning(f"Note: Online store unavailable ({e}).")
 
-    try:
-        # Offline store gives the bulk of the history
-        offline_data = fg.read(online=False)
-    except Exception as e:
-        st.sidebar.error(f"Error: Offline store read failed ({e}).")
-
-    # Debug info for the user to see raw counts
     with st.sidebar.expander("🔍 Data Diagnostics", expanded=False):
         st.write(f"Raw Online Rows: {len(online_data)}")
         if not online_data.empty:
             st.write(f"Latest Online: {pd.to_datetime(online_data['timestamp'], utc=True).max()}")
-        st.write(f"Raw Offline Rows: {len(offline_data)}")
-        if not offline_data.empty:
-            st.write(f"Latest Offline: {pd.to_datetime(offline_data['timestamp'], utc=True).max()}")
 
-    if online_data.empty and offline_data.empty:
+    if online_data.empty:
         return pd.DataFrame()
 
-    # Merge and deduplicate to get the most complete and fresh picture
-    data = pd.concat([online_data, offline_data], ignore_index=True)
-    data["timestamp"] = pd.to_datetime(data["timestamp"], utc=True)
-    
-    # Ensure sorting and remove duplicates, keeping the most recent entry for any given timestamp
-    data = data.sort_values("timestamp").drop_duplicates(subset=["timestamp"], keep="last").reset_index(drop=True)
-    
-    # Filter for rows that have an AQI label (real AQI data)
-    data = data[data["aqi"].notna()].copy()
-    
-    if data.empty:
+    online_data["timestamp"] = pd.to_datetime(online_data["timestamp"], utc=True)
+    online_data = online_data.sort_values("timestamp").drop_duplicates(subset=["timestamp"], keep="last").reset_index(drop=True)
+    online_data = online_data[online_data["aqi"].notna()].copy()
+
+    if online_data.empty:
         return pd.DataFrame()
 
-    return prepare_prediction_frame(data)
+    return prepare_prediction_frame(online_data)
 
 
 def _loading_state_html(step: str, percent: int, detail: str) -> str:
@@ -750,23 +732,6 @@ def _model_buttons(bundle: ModelBundle, comparison_frame: pd.DataFrame, ui_prefi
     state_key = f"{ui_prefix}_selected_model_{bundle.horizon}h"
     if state_key not in st.session_state:
         st.session_state[state_key] = bundle.model_name if bundle.model_name in set(comparison_frame["model"]) else comparison_frame.iloc[0]["model"]
-
-    selected_model = st.session_state[state_key]
-    button_cols = st.columns(max(1, len(comparison_frame)))
-
-    for column, (_, row) in zip(button_cols, comparison_frame.iterrows()):
-        label = row["label"]
-        model_name = row["model"]
-        with column:
-            if st.button(
-                label,
-                key=f"{ui_prefix}_{state_key}_{model_name}",
-                type="primary" if model_name == selected_model else "secondary",
-                use_full_width=True,
-            ):
-                st.session_state[state_key] = model_name
-                st.rerun()
-
     return st.session_state[state_key]
 
 

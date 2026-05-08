@@ -215,3 +215,4 @@ cleanup_hopsworks.py
 oldbackfill.py
 oldfeature.py
 localdata.py
+fix_materialization.py
