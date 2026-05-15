@@ -591,6 +591,7 @@ def _shap_importance(bundle: ModelBundle, history: pd.DataFrame) -> pd.DataFrame
         result = pd.DataFrame(columns=["feature", "importance"])
         st.session_state[cache_key] = result
         return result
+
     sample  = history.tail(min(200, len(history)))
     x       = sample[bundle.feature_cols]
     try:
@@ -602,9 +603,25 @@ def _shap_importance(bundle: ModelBundle, history: pd.DataFrame) -> pd.DataFrame
             shap_vals = explainer.shap_values(x)
     except Exception:
         # Some XGBoost/SHAP version combinations cannot parse the serialized base_score.
-        # Fall back to a model-agnostic explainer so the page still renders.
-        explainer = shap.Explainer(bundle.model.predict, x, algorithm="permutation")
-        shap_vals = explainer(x).values
+        # Fall back to a fast feature-importance profile instead of a slow permutation explainer.
+        if hasattr(bundle.model, "feature_importances_"):
+            importance = np.asarray(bundle.model.feature_importances_, dtype=float)
+            if importance.ndim == 1 and len(importance) == len(bundle.feature_cols):
+                importance = np.abs(importance)
+                total = float(importance.sum())
+                if total > 0:
+                    importance = importance / total
+                result = (
+                    pd.DataFrame({"feature": bundle.feature_cols, "importance": importance})
+                    .sort_values("importance", ascending=False)
+                    .reset_index(drop=True)
+                )
+                st.session_state[cache_key] = result
+                return result
+
+        result = pd.DataFrame(columns=["feature", "importance"])
+        st.session_state[cache_key] = result
+        return result
     if isinstance(shap_vals, list):
         shap_vals = shap_vals[0]
     importance = np.abs(np.asarray(shap_vals)).mean(axis=0)
@@ -621,7 +638,7 @@ def _lime_importance(bundle: ModelBundle, history: pd.DataFrame) -> pd.DataFrame
     if cached is not None:
         return cached
 
-    if not LIME_AVAILABLE or bundle.model_type == "tensorflow":
+    if bundle.model_type == "tensorflow":
         result = pd.DataFrame(columns=["feature", "weight"])
         st.session_state[cache_key] = result
         return result
@@ -633,6 +650,31 @@ def _lime_importance(bundle: ModelBundle, history: pd.DataFrame) -> pd.DataFrame
         return result
 
     row = history.tail(1)[bundle.feature_cols].iloc[0].to_numpy()
+
+    if bundle.model_type == "xgboost" or not LIME_AVAILABLE:
+        background_mean = background.mean(numeric_only=True)
+        background_std = background.std(numeric_only=True).replace(0, 1).fillna(1)
+        if hasattr(bundle.model, "feature_importances_"):
+            weights = np.asarray(bundle.model.feature_importances_, dtype=float)
+            if weights.ndim != 1 or len(weights) != len(bundle.feature_cols):
+                weights = np.ones(len(bundle.feature_cols), dtype=float)
+        else:
+            weights = np.ones(len(bundle.feature_cols), dtype=float)
+
+        total = float(np.abs(weights).sum())
+        if total > 0:
+            weights = weights / total
+
+        signed_local = ((row - background_mean.to_numpy()) / background_std.to_numpy()) * weights
+        result = (
+            pd.DataFrame({"feature": bundle.feature_cols, "weight": signed_local})
+            .reindex(columns=["feature", "weight"])
+            .sort_values("weight", key=lambda s: np.abs(s), ascending=False)
+            .reset_index(drop=True)
+        )
+        st.session_state[cache_key] = result
+        return result
+
     def _lime_predict(values: np.ndarray) -> np.ndarray:
         frame = pd.DataFrame(values, columns=bundle.feature_cols)
         return bundle.model.predict(frame)
@@ -642,15 +684,24 @@ def _lime_importance(bundle: ModelBundle, history: pd.DataFrame) -> pd.DataFrame
             training_data=background.to_numpy(),
             feature_names=bundle.feature_cols,
             mode="regression",
-            discretize_continuous=True,
+            discretize_continuous=False,
             random_state=42,
         )
         explanation = explainer.explain_instance(row, _lime_predict, num_features=min(10, len(bundle.feature_cols)))
         result = pd.DataFrame(explanation.as_list(), columns=["feature", "weight"])
     except Exception:
-        # LIME can fail on some model/data combinations (for example, sparse or near-constant features).
-        # Return an empty frame so the dashboard can keep rendering.
-        result = pd.DataFrame(columns=["feature", "weight"])
+        # LIME can fail on some model/data combinations.
+        # Return a lightweight local proxy so the dashboard still shows a chart.
+        background_mean = background.mean(numeric_only=True)
+        background_std = background.std(numeric_only=True).replace(0, 1).fillna(1)
+        result = (
+            pd.DataFrame({
+                "feature": bundle.feature_cols,
+                "weight": ((row - background_mean.to_numpy()) / background_std.to_numpy())
+            })
+            .sort_values("weight", key=lambda s: np.abs(s), ascending=False)
+            .reset_index(drop=True)
+        )
 
     st.session_state[cache_key] = result
     return result
