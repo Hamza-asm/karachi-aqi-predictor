@@ -1387,6 +1387,8 @@ def main() -> None:
                         [0.8,  "#a855f7"],
                         [1.0,  "#dc2626"],
                     ],
+                    cmin=0,
+                    cmax=500,
                     size=4,
                     opacity=0.6,
                     showscale=True,
