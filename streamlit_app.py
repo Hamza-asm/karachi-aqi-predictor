@@ -1526,4 +1526,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        st.error("The dashboard encountered an unexpected error while rendering.")
+        st.stop()
