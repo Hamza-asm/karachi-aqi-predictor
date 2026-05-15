@@ -1512,7 +1512,11 @@ def main() -> None:
             reference_name = "Ridge Regression" if selected_model == "ridge" else _model_display_name(selected_model)
             st.markdown(f"**Reference Model: {reference_name}**")
             with st.expander(f"Feature relations reference — {reference_name}", expanded=True):
-                _render_model_explainability(primary_bundle, history, selected_model)
+                try:
+                    _render_model_explainability(primary_bundle, history, selected_model)
+                except Exception as exc:
+                    st.info("Explainability charts are unavailable for this model bundle right now.")
+                    st.caption(f"Fallback reason: {exc.__class__.__name__}")
 
     st.markdown("""
     <p style="font-size:0.75rem;color:#334155;text-align:center;margin-top:2rem;padding-top:1rem;
