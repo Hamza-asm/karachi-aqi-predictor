@@ -1366,14 +1366,19 @@ def main() -> None:
         # Chart 1: PM2.5 vs AQI scatter
         with chart_col1:
             st.markdown('<div class="section-header">PM2.5 vs AQI</div>', unsafe_allow_html=True)
-            scatter_df = eda_df[["pm25", "aqi"]].dropna().sample(min(2000, len(eda_df)), random_state=42)
+            scatter_df = eda_df[["pm25"]].dropna().copy()
+            scatter_df["aqi_calc"] = scatter_df["pm25"].apply(pm25_to_aqi)
+            if scatter_df.empty:
+                st.info("No PM2.5 values available for the scatter chart.")
+                return
+            scatter_df = scatter_df.sample(min(2000, len(scatter_df)), random_state=42)
             fig_scatter = go.Figure()
             fig_scatter.add_trace(go.Scatter(
                 x=scatter_df["pm25"],
-                y=scatter_df["aqi"],
+                y=scatter_df["aqi_calc"],
                 mode="markers",
                 marker=dict(
-                    color=scatter_df["aqi"],
+                    color=scatter_df["aqi_calc"],
                     colorscale=[
                         [0.0,  "#22c55e"],
                         [0.2,  "#eab308"],
