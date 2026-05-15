@@ -593,11 +593,18 @@ def _shap_importance(bundle: ModelBundle, history: pd.DataFrame) -> pd.DataFrame
         return result
     sample  = history.tail(min(200, len(history)))
     x       = sample[bundle.feature_cols]
-    if hasattr(bundle.model, "coef_"):
-        explainer   = shap.LinearExplainer(bundle.model, x, feature_perturbation="interventional")
-    else:
-        explainer   = shap.TreeExplainer(bundle.model)
-    shap_vals = explainer.shap_values(x)
+    try:
+        if hasattr(bundle.model, "coef_"):
+            explainer = shap.LinearExplainer(bundle.model, x, feature_perturbation="interventional")
+            shap_vals = explainer.shap_values(x)
+        else:
+            explainer = shap.TreeExplainer(bundle.model)
+            shap_vals = explainer.shap_values(x)
+    except Exception:
+        # Some XGBoost/SHAP version combinations cannot parse the serialized base_score.
+        # Fall back to a model-agnostic explainer so the page still renders.
+        explainer = shap.Explainer(bundle.model.predict, x, algorithm="permutation")
+        shap_vals = explainer(x).values
     if isinstance(shap_vals, list):
         shap_vals = shap_vals[0]
     importance = np.abs(np.asarray(shap_vals)).mean(axis=0)
