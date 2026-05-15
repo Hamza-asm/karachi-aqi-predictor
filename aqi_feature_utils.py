@@ -67,7 +67,7 @@ def aqi_category(aqi: float) -> tuple[str, str]:
     if aqi <= 50:
         return "Good", "#00e400"
     if aqi <= 100:
-        return "Moderate", "#ffff00"
+        return "Moderate", "#f97316"
     if aqi <= 150:
         return "Unhealthy for Sensitive Groups", "#ff7e00"
     if aqi <= 200:

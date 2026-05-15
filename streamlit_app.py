@@ -407,7 +407,7 @@ CONFIDENCE_LABELS = {
 
 AQI_COLORS = {
     "Good":                                 "#22c55e",
-    "Moderate":                             "#eab308",
+    "Moderate":                             "#f97316",
     "Unhealthy for Sensitive Groups":   "#f97316",
     "Unhealthy":                            "#ef4444",
     "Very Unhealthy":                   "#a855f7",
@@ -637,15 +637,21 @@ def _lime_importance(bundle: ModelBundle, history: pd.DataFrame) -> pd.DataFrame
         frame = pd.DataFrame(values, columns=bundle.feature_cols)
         return bundle.model.predict(frame)
 
-    explainer = LimeTabularExplainer(
-        training_data=background.to_numpy(),
-        feature_names=bundle.feature_cols,
-        mode="regression",
-        discretize_continuous=True,
-        random_state=42,
-    )
-    explanation = explainer.explain_instance(row, _lime_predict, num_features=min(10, len(bundle.feature_cols)))
-    result = pd.DataFrame(explanation.as_list(), columns=["feature", "weight"])
+    try:
+        explainer = LimeTabularExplainer(
+            training_data=background.to_numpy(),
+            feature_names=bundle.feature_cols,
+            mode="regression",
+            discretize_continuous=True,
+            random_state=42,
+        )
+        explanation = explainer.explain_instance(row, _lime_predict, num_features=min(10, len(bundle.feature_cols)))
+        result = pd.DataFrame(explanation.as_list(), columns=["feature", "weight"])
+    except Exception:
+        # LIME can fail on some model/data combinations (for example, sparse or near-constant features).
+        # Return an empty frame so the dashboard can keep rendering.
+        result = pd.DataFrame(columns=["feature", "weight"])
+
     st.session_state[cache_key] = result
     return result
 
