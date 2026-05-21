@@ -244,6 +244,16 @@ def train_for_horizon(project: object, df: pd.DataFrame, horizon_hours: int) -> 
     # FIX 1: NEVER DROP ROWS BASED ON FC FEATURES. Only drop if the target is missing.
     model_frame = model_frame.dropna(subset=[target_col])
 
+    # DROP rows with missing lag features for this horizon — these produce invalid
+    # training examples (e.g. aqi_lag_24h NaNs). Only drop lag columns, not forecast cols.
+    lag_cols = [c for c in HORIZON_LAG_COLS.get(horizon_hours, []) if c in model_frame.columns]
+    if lag_cols:
+        before_rows = len(model_frame)
+        model_frame = model_frame.dropna(subset=lag_cols)
+        dropped = before_rows - len(model_frame)
+        if dropped:
+            logging.info("Dropped %s rows with NaN lag features for %sh (rows: %s → %s)", dropped, horizon_hours, before_rows, len(model_frame))
+
     if model_frame.empty:
         raise RuntimeError(f"No training rows for horizon {horizon_hours}h")
 
