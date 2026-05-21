@@ -567,18 +567,26 @@ def _loading_state_html(step: str, percent: int, detail: str) -> str:
     """
 
 
+def _aligned_feature_frame(frame: pd.DataFrame, feature_cols: list[str]) -> pd.DataFrame:
+    """Return a feature frame with the exact trained columns, zero-filling any that are missing."""
+    if frame.empty:
+        return frame.reindex(columns=feature_cols, fill_value=0)
+    aligned = frame.reindex(columns=feature_cols, fill_value=0).copy()
+    return aligned
+
+
 def _predict(bundle: ModelBundle, history: pd.DataFrame) -> float:
     if history.empty:
         raise RuntimeError("No history available for prediction")
     if bundle.model_type == "tensorflow":
         if len(history) < bundle.lookback_window:
             raise RuntimeError(f"Need {bundle.lookback_window} rows for LSTM")
-        window = history.tail(bundle.lookback_window)[bundle.feature_cols].to_numpy(dtype=np.float32)
+        window = _aligned_feature_frame(history.tail(bundle.lookback_window), bundle.feature_cols).to_numpy(dtype=np.float32)
         scaled = bundle.scaler.transform(
             window.reshape(-1, len(bundle.feature_cols))
         ).reshape(1, bundle.lookback_window, len(bundle.feature_cols))
         return float(bundle.model.predict(scaled, verbose=0).reshape(-1)[0])
-    return float(bundle.model.predict(history.tail(1)[bundle.feature_cols])[0])
+    return float(bundle.model.predict(_aligned_feature_frame(history.tail(1), bundle.feature_cols))[0])
 
 
 def _shap_importance(bundle: ModelBundle, history: pd.DataFrame) -> pd.DataFrame:
@@ -592,7 +600,7 @@ def _shap_importance(bundle: ModelBundle, history: pd.DataFrame) -> pd.DataFrame
         st.session_state[cache_key] = result
         return result
 
-    sample  = history.tail(min(200, len(history)))
+    sample  = _aligned_feature_frame(history.tail(min(200, len(history))), bundle.feature_cols)
     x       = sample[bundle.feature_cols]
     try:
         if hasattr(bundle.model, "coef_"):
@@ -643,13 +651,13 @@ def _lime_importance(bundle: ModelBundle, history: pd.DataFrame) -> pd.DataFrame
         st.session_state[cache_key] = result
         return result
 
-    background = history.tail(min(500, len(history)))[bundle.feature_cols].copy()
+    background = _aligned_feature_frame(history.tail(min(500, len(history))), bundle.feature_cols).copy()
     if background.empty:
         result = pd.DataFrame(columns=["feature", "weight"])
         st.session_state[cache_key] = result
         return result
 
-    row = history.tail(1)[bundle.feature_cols].iloc[0].to_numpy()
+    row = _aligned_feature_frame(history.tail(1), bundle.feature_cols).iloc[0].to_numpy()
 
     if bundle.model_type == "xgboost" or not LIME_AVAILABLE:
         background_mean = background.mean(numeric_only=True)

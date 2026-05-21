@@ -27,6 +27,8 @@ FEATURE_COLUMNS = [
     "hour_cos",
     "dow_sin",
     "dow_cos",
+    "hours_since_prev",
+    "is_gap",
     "aqi_lag_1h",
     "aqi_lag_3h",
     "aqi_lag_6h",
@@ -97,6 +99,9 @@ def add_engineered_features(df: pd.DataFrame) -> pd.DataFrame:
     data["hour_cos"] = np.cos(2 * np.pi * data["hour_of_day"] / 24)
     data["dow_sin"] = np.sin(2 * np.pi * data["day_of_week"] / 7)
     data["dow_cos"] = np.cos(2 * np.pi * data["day_of_week"] / 7)
+    gap_hours = data["timestamp"].diff().dt.total_seconds().div(3600).fillna(0)
+    data["hours_since_prev"] = gap_hours.astype("float32")
+    data["is_gap"] = (gap_hours > 1.0).astype("int8")
 
     if "aqi" in data.columns:
         data["aqi_lag_1h"] = data["aqi"].shift(1)
@@ -126,7 +131,45 @@ def add_engineered_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_training_frame(df: pd.DataFrame, horizon_hours: int) -> pd.DataFrame:
-    data = add_engineered_features(df)
+    lag_cols = [
+        "aqi_lag_1h",
+        "aqi_lag_3h",
+        "aqi_lag_6h",
+        "aqi_lag_12h",
+        "aqi_lag_24h",
+        "rolling_mean_6h",
+        "rolling_mean_24h",
+        "rolling_std_6h",
+        "rolling_std_24h",
+    ]
+
+    if all(column in df.columns for column in lag_cols):
+        data = ensure_datetime_utc(df).sort_values("timestamp").reset_index(drop=True)
+        for column in ["hour_of_day", "day_of_week", "month", "hour_sin", "hour_cos", "dow_sin", "dow_cos"]:
+            if column not in data.columns:
+                if column == "hour_of_day":
+                    data[column] = data["timestamp"].dt.hour.astype("int32")
+                elif column == "day_of_week":
+                    data[column] = data["timestamp"].dt.dayofweek.astype("int32")
+                elif column == "month":
+                    data[column] = data["timestamp"].dt.month.astype("int32")
+                elif column == "hour_sin":
+                    data[column] = np.sin(2 * np.pi * data["hour_of_day"] / 24)
+                elif column == "hour_cos":
+                    data[column] = np.cos(2 * np.pi * data["hour_of_day"] / 24)
+                elif column == "dow_sin":
+                    data[column] = np.sin(2 * np.pi * data["day_of_week"] / 7)
+                elif column == "dow_cos":
+                    data[column] = np.cos(2 * np.pi * data["day_of_week"] / 7)
+        if "hours_since_prev" not in data.columns or "is_gap" not in data.columns:
+            gap_hours = data["timestamp"].diff().dt.total_seconds().div(3600).fillna(0)
+            if "hours_since_prev" not in data.columns:
+                data["hours_since_prev"] = gap_hours.astype("float32")
+            if "is_gap" not in data.columns:
+                data["is_gap"] = (gap_hours > 1.0).astype("int8")
+    else:
+        data = add_engineered_features(df)
+
     data[f"aqi_next_{horizon_hours}h"] = data["aqi"].shift(-horizon_hours)
     return data
 

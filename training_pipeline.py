@@ -53,6 +53,8 @@ BASE_FEATURE_COLS = [
     "hour_cos",
     "dow_sin",
     "dow_cos",
+    "hours_since_prev",
+    "is_gap",
 ]
 
 HORIZON_LAG_COLS = {
