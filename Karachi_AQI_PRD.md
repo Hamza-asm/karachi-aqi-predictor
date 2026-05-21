@@ -184,7 +184,6 @@ GitHub Actions is used as the serverless scheduler. No Airflow, no Docker, no lo
 | **Variable**          | **Where to set**              | **Description**                            |
 | --------------------- | ----------------------------- | ------------------------------------------ |
 | `HOPSWORKS_API_KEY`   | GitHub Secrets + local `.env` | Hopsworks project API key                  |
-| `AQICN_API_KEY`       | (removed)                     | AQICN is no longer used; replaced by Open-Meteo (no API key) |
 | `OPENWEATHER_API_KEY` | GitHub Secrets + local `.env` | OpenWeatherMap key (optional fallback)     |
 
 ---
@@ -192,7 +191,6 @@ GitHub Actions is used as the serverless scheduler. No Airflow, no Docker, no lo
 # 11. Deployment Checklist
 
 - [ ] Create Hopsworks free account at app.hopsworks.ai and get API key
-- [ ] (no AQICN key required anymore — using Open-Meteo)
 - [ ] Add `HOPSWORKS_API_KEY` to GitHub Secrets
 - [ ] Run `backfill_pipeline.py` once manually to populate 6 months of historical features
 - [ ] Run `training_pipeline.py` once manually to create first model version

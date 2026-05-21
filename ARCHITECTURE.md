@@ -47,8 +47,7 @@ karachi-aqi-predictor/
 │
 ├── src/
 │   ├── data/
-│   │   ├── aqicn_client.py           # API wrapper for AQICN
-│   │   └── openweather_client.py     # API wrapper for OpenWeatherMap
+│   │   └── openweather_client.py     # API wrapper for OpenWeatherMap (optional)
 │   ├── features/
 │   │   ├── feature_engineering.py    # All feature computation logic
 │   │   └── hopsworks_client.py       # Hopsworks connection + read/write helpers
@@ -90,7 +89,7 @@ karachi-aqi-predictor/
 ## Data Flow (Step by Step)
 
 ```
-[AQICN / OpenWeather API]
+[Open-Meteo (primary)]
         │
         ▼  (every hour via GitHub Actions)
 [feature_pipeline.py]
@@ -240,7 +239,7 @@ jobs:
       - run: python pipelines/feature_pipeline.py
         env:
           HOPSWORKS_API_KEY: ${{ secrets.HOPSWORKS_API_KEY }}
-          AQICN_API_KEY: ${{ secrets.AQICN_API_KEY }}
+          # AQICN removed — using Open-Meteo; no AQICN API key required
 ```
 
 ### Training pipeline — runs every day
@@ -313,7 +312,7 @@ Alerts are triggered when predicted AQI > 150 for any of the 3 forecast days.
 ```bash
 # .env.example — copy to .env locally, add to GitHub Secrets for CI/CD
 HOPSWORKS_API_KEY=your_key_here
-AQICN_API_KEY=your_key_here
+# AQICN_API_KEY is not required (using Open-Meteo for forecasts/history)
 OPENWEATHER_API_KEY=your_key_here   # optional fallback
 ```
 
@@ -333,7 +332,7 @@ OPENWEATHER_API_KEY=your_key_here   # optional fallback
 ## Deployment Checklist
 
 1. [ ] Create Hopsworks free account → get API key
-2. [ ] Get AQICN API key (free at aqicn.org/api)
+2. [ ] (no AQICN key required anymore — using Open-Meteo)
 3. [ ] Add secrets to GitHub repo (Settings → Secrets → Actions)
 4. [ ] Run `backfill_pipeline.py` once manually to populate historical data
 5. [ ] Run `training_pipeline.py` once manually to create first model

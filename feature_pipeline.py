@@ -59,7 +59,7 @@ def pm25_to_aqi(pm25: float) -> float:
 def fetch_openmeteo_current(lat: float = KARACHI_LAT, lon: float = KARACHI_LON) -> pd.DataFrame:
     """
     Fetch the current hour's air quality from Open-Meteo (free, no API key).
-    Returns a single-row DataFrame with the same columns as the old AQICN fetch.
+    Returns a single-row DataFrame with the same columns as the legacy label fetch.
     """
     # -- air quality ----------------------------------------------------------
     aq_url = "https://air-quality-api.open-meteo.com/v1/air-quality"

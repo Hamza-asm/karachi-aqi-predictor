@@ -21,6 +21,5 @@ jobs:
       - name: Run feature pipeline
         env:
           HOPSWORKS_API_KEY: ${{ secrets.HOPSWORKS_API_KEY }}
-          # AQICN removed — using Open-Meteo; no API key required here
           HOPSWORKS_HOST: eu-west.cloud.hopsworks.ai
         run: python feature_pipeline.py
