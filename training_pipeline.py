@@ -75,11 +75,14 @@ HORIZON_FORECAST_WINDOWS = {
     72: ["72h"],
 }
 
+# PM2.5 forecast directly maps into AQI via the target construction, so keep it out of training features.
+FORECAST_BASE_FEATURES = ["fc_co", "fc_no2", "fc_so2", "fc_o3", "fc_dust", "fc_uvi"]
+
 # Forecast feature columns added by feature_pipeline + backfill
 FORECAST_FEATURE_COLS = [
     f"{base}_{window}"
     for window in ["24h", "48h", "72h"]
-    for base in ["fc_pm25", "fc_co", "fc_no2", "fc_so2", "fc_o3", "fc_dust", "fc_uvi"]
+    for base in FORECAST_BASE_FEATURES
 ]
 
 
@@ -112,7 +115,7 @@ def get_horizon_feature_cols(df: pd.DataFrame, horizon_hours: int) -> list[str]:
     forecast_cols = [
         f"{base}_{window}"
         for window in HORIZON_FORECAST_WINDOWS.get(horizon_hours, [])
-        for base in ["fc_pm25", "fc_co", "fc_no2", "fc_so2", "fc_o3", "fc_dust", "fc_uvi"]
+        for base in FORECAST_BASE_FEATURES
     ]
     
     valid_cols = []

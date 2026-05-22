@@ -282,6 +282,7 @@ def main() -> None:
         event_time  = "timestamp",
         description = "Karachi AQI — Open-Meteo current + 72h forecast features",
     )
+    latest = latest.drop(columns=['hours_since_prev', 'is_gap'], errors='ignore')
     fg.insert(latest)
     logging.info("Inserted %s row into feature group aqi_features:1", len(latest))
 
