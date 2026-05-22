@@ -1,5 +1,5 @@
  <p align="center">
-    <img src="images/Title%20Banner.png" alt="Title Banner" width="1000"/>
+    <img src="Images/Title%20Banner.png" alt="Title Banner" width="1000"/>
  </p>
 
 <p align="center">
@@ -14,7 +14,37 @@
 >
 > **Goal:** End-to-end, fully serverless ML system that forecasts Karachi's Air Quality Index (AQI) at 24h, 48h, and 72h horizons.
 
----
+
+
+## Introduction
+
+This repository contains a production-oriented, serverless machine learning system that forecasts Karachi's AQI out to 72 hours. It is intentionally lightweight (four flat pipeline scripts), uses Hopsworks as the central data and model layer, and exposes a Streamlit dashboard for visualization and alerting. The project is built for reproducibility and operations: pipelines are runnable locally, CI is provided through GitHub Actions, and models & features are versioned in Hopsworks.
+
+Key points:
+- Predictive horizon: 24h, 48h, 72h forecasts (separate models per horizon).
+- Data sources: Open-Meteo (weather + pollutant forecasts / history). Historical ground-truth label data was used during earlier experiments — see the PRD for details.
+- Feature store & model registry: Hopsworks (free tier).
+- Dashboard: Streamlit (deployed to Streamlit Cloud in production).
+
+
+## Dashboard screenshots
+
+<div align="center">
+    <img src="Images/ForecastOverview.png" alt="Forecast overview" width="800"/>
+    <p><em>Forecast overview: 3-day AQI predictions, current AQI badge, and model comparison controls.</em></p>
+</div>
+
+<div align="center">
+    <img src="Images/ModelInsights.png" alt="Model insights" width="800"/>
+    <p><em>Model insights: SHAP summary and top feature importances used to explain predictions.</em></p>
+</div>
+
+<div align="center">
+    <img src="Images/EDA.png" alt="EDA view" width="800"/>
+    <p><em>Exploratory data analysis: historical AQI trends and pollutant correlation matrices.</em></p>
+</div>
+
+
 
 ## Architecture
 
@@ -58,7 +88,7 @@
 - Open-Meteo for all features (free, no API key, 7-day forecast + 3-month history)
 - Random Forest selected as best model across all horizons after multi-model comparison
 
----
+
 
 ## My Journey — From Idea to Deployed System
 
@@ -130,7 +160,6 @@ The most operationally intense day of the project. A cascade of infrastructure p
 
 GitHub Actions configured for scheduled pipeline runs. Kept disabled during active local debugging — local-first, CI/CD second. Re-enabled after all pipeline fixes were stable and pushed to GitHub.
 
----
 
 ## Challenges & How I Managed Them
 
@@ -153,6 +182,7 @@ GitHub Actions configured for scheduled pipeline runs. Kept disabled during acti
 
 ---
 
+
 ## Key Learnings
 
 1. **Fix your data before tuning your model.** The distribution shift fix gave a larger R² improvement than any model change.
@@ -164,7 +194,7 @@ GitHub Actions configured for scheduled pipeline runs. Kept disabled during acti
 7. **Always backup before deleting.** Feature group deletions are irreversible. CSV backup saved 2400 rows from being permanently lost.
 8. **Serverless shared infrastructure has limits.** Free tier Hopsworks is shared — a single zombie job can block your entire project for a day. Reduce Spark resource requests to minimum viable to compete fairly on shared clusters.
 
----
+
 
 ## Final Model Metrics (v21)
 
@@ -174,7 +204,7 @@ GitHub Actions configured for scheduled pipeline runs. Kept disabled during acti
 | 48h | Random Forest | 10.47 | 0.22 |
 | 72h | Random Forest | 10.93 | 0.16 |
 
----
+
 
 >*Dataset: 2026-01-30 → 2026-05-20 (92-day rolling window) 
 | Clean rows after gap filtering: ~1700 per horizon | Features: 29-34 per horizon (lags, rolling stats, cyclical encodings, forecast signals) | Models: Random Forest | Registry: Hopsworks v21*
