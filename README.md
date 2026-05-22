@@ -158,6 +158,7 @@ GitHub Actions is configured for scheduled pipeline runs but not yet fully enabl
 
 | Challenge                                 | Root Cause                                                                                    | Resolution                                                                                    |
 | ----------------------------------------- | --------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| R² turned negative after fc_pm25 removal and all retraining attempts | Timestamp gaps (shift(-24) pointed to wrong future timestamps — e.g. 30h, 60h, 151h ahead instead of exactly 24h; corrupted targets) | Added exact-horizon validation in `build_training_frame` to drop rows where the shifted target timestamp is not exactly `horizon_hours` ahead; dropped 192/216/240 rows per horizon. R² recovered to 0.24/0.30/0.06 |
 | Negative R² after initial training        | Distribution shift — synthetic backfill data vs. later real label data had very different AQI means | Deleted and rebuilt the feature group twice; kept only later real label data from 2025-03-04 onward |
 | Hopsworks pipeline hanging for 30+ min    | Stuck job — didn't fail, just hung; 7-day forecast data not persisted                         | Manually killed the job via Hopsworks UI, re-triggered; added explicit timeouts               |
 | Dashboard model re-downloads too frequent | Cache TTL set too short                                                                       | Extended model cache TTL to 6 hours                                                           |
@@ -176,6 +177,7 @@ GitHub Actions is configured for scheduled pipeline runs but not yet fully enabl
 3. **Simple architecture is a feature.** Four flat scripts beat a complex package hierarchy for a project of this scope.
 4. **Operational bugs are real bugs.** Cache TTL, stuck jobs, and stale timestamps are production problems that matter just as much as model metrics.
 5. **Serverless first.** Avoiding Docker/Airflow kept the project deployable without infrastructure overhead.
+6. **Timestamp gaps corrupt shift-based targets.** If your hourly data has missing rows, df.shift(-24) does not guarantee a 24h-ahead target it just shifts by row index.Always validate that target_timestamp, current_timestamp== horizon_hours before training, and drop rows where it doesn't hold.
 
 ---
 

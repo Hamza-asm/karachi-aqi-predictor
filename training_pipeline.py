@@ -361,6 +361,7 @@ def main() -> None:
 
     host             = os.getenv("HOPSWORKS_HOST", "eu-west.cloud.hopsworks.ai")
     api_key          = os.getenv("HOPSWORKS_API_KEY")
+    # Default to the project's DEFAULT_TRAIN_START (92 days) unless overridden.
     train_start_date = os.getenv("TRAIN_START_DATE", DEFAULT_TRAIN_START)
 
     if not api_key:

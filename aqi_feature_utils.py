@@ -182,7 +182,28 @@ def build_training_frame(df: pd.DataFrame, horizon_hours: int) -> pd.DataFrame:
         if col not in data.columns:
             data[col] = np.nan
 
+    # Create target value by shifting the aqi column
     data[f"aqi_next_{horizon_hours}h"] = data["aqi"].shift(-horizon_hours)
+
+    # CRITICAL FIX: only keep rows where the shifted target timestamp is
+    # exactly `horizon_hours` ahead. This excludes rows where gaps cause the
+    # target to be e.g. 30h, 60h, etc. ahead, which would corrupt training.
+    data["_target_timestamp"] = data["timestamp"].shift(-horizon_hours)
+    data["_actual_hours_ahead"] = (
+        data["_target_timestamp"] - data["timestamp"]
+    ).dt.total_seconds() / 3600
+
+    before = len(data)
+    data = data[data["_actual_hours_ahead"] == float(horizon_hours)].copy()
+    data = data.drop(columns=["_target_timestamp", "_actual_hours_ahead"])
+    dropped = before - len(data)
+    if dropped:
+        import logging
+        logging.info(
+            "Horizon %sh: dropped %s rows where target was not exactly %sh ahead (timestamp gaps)",
+            horizon_hours, dropped, horizon_hours,
+        )
+
     return data
 
 
