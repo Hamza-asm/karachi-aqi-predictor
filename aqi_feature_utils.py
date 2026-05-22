@@ -131,6 +131,11 @@ def add_engineered_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_training_frame(df: pd.DataFrame, horizon_hours: int) -> pd.DataFrame:
+    # Prefer stored lag/rolling columns from the feature store. Do NOT recompute
+    # lags from the `aqi` column here — that would alter the provenance of the
+    # precomputed features and enable leakage. If lag/rolling columns are
+    # missing, create them as NaN so the training pipeline can decide how to
+    # handle/drop those rows.
     lag_cols = [
         "aqi_lag_1h",
         "aqi_lag_3h",
@@ -143,32 +148,39 @@ def build_training_frame(df: pd.DataFrame, horizon_hours: int) -> pd.DataFrame:
         "rolling_std_24h",
     ]
 
-    if all(column in df.columns for column in lag_cols):
-        data = ensure_datetime_utc(df).sort_values("timestamp").reset_index(drop=True)
-        for column in ["hour_of_day", "day_of_week", "month", "hour_sin", "hour_cos", "dow_sin", "dow_cos"]:
-            if column not in data.columns:
-                if column == "hour_of_day":
-                    data[column] = data["timestamp"].dt.hour.astype("int32")
-                elif column == "day_of_week":
-                    data[column] = data["timestamp"].dt.dayofweek.astype("int32")
-                elif column == "month":
-                    data[column] = data["timestamp"].dt.month.astype("int32")
-                elif column == "hour_sin":
-                    data[column] = np.sin(2 * np.pi * data["hour_of_day"] / 24)
-                elif column == "hour_cos":
-                    data[column] = np.cos(2 * np.pi * data["hour_of_day"] / 24)
-                elif column == "dow_sin":
-                    data[column] = np.sin(2 * np.pi * data["day_of_week"] / 7)
-                elif column == "dow_cos":
-                    data[column] = np.cos(2 * np.pi * data["day_of_week"] / 7)
-        if "hours_since_prev" not in data.columns or "is_gap" not in data.columns:
-            gap_hours = data["timestamp"].diff().dt.total_seconds().div(3600).fillna(0)
-            if "hours_since_prev" not in data.columns:
-                data["hours_since_prev"] = gap_hours.astype("float32")
-            if "is_gap" not in data.columns:
-                data["is_gap"] = (gap_hours > 1.0).astype("int8")
-    else:
-        data = add_engineered_features(df)
+    data = ensure_datetime_utc(df).sort_values("timestamp").reset_index(drop=True)
+
+    # Ensure basic time-derived features exist (safe to compute here).
+    for column in ["hour_of_day", "day_of_week", "month", "hour_sin", "hour_cos", "dow_sin", "dow_cos"]:
+        if column not in data.columns:
+            if column == "hour_of_day":
+                data[column] = data["timestamp"].dt.hour.astype("int32")
+            elif column == "day_of_week":
+                data[column] = data["timestamp"].dt.dayofweek.astype("int32")
+            elif column == "month":
+                data[column] = data["timestamp"].dt.month.astype("int32")
+            elif column == "hour_sin":
+                data[column] = np.sin(2 * np.pi * data["hour_of_day"] / 24)
+            elif column == "hour_cos":
+                data[column] = np.cos(2 * np.pi * data["hour_of_day"] / 24)
+            elif column == "dow_sin":
+                data[column] = np.sin(2 * np.pi * data["day_of_week"] / 7)
+            elif column == "dow_cos":
+                data[column] = np.cos(2 * np.pi * data["day_of_week"] / 7)
+
+    # Compute gap features only if they are not already present.
+    if "hours_since_prev" not in data.columns or "is_gap" not in data.columns:
+        gap_hours = data["timestamp"].diff().dt.total_seconds().div(3600).fillna(0)
+        if "hours_since_prev" not in data.columns:
+            data["hours_since_prev"] = gap_hours.astype("float32")
+        if "is_gap" not in data.columns:
+            data["is_gap"] = (gap_hours > 1.0).astype("int8")
+
+    # Ensure lag/rolling columns exist but DO NOT compute them here; leave as NaN
+    # if not provided by the feature materialization step.
+    for col in lag_cols:
+        if col not in data.columns:
+            data[col] = np.nan
 
     data[f"aqi_next_{horizon_hours}h"] = data["aqi"].shift(-horizon_hours)
     return data
