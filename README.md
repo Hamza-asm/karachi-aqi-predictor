@@ -58,17 +58,17 @@ Key points:
 ┌──────────────────────────────────────────────────────────────────┐
 │                  4 PIPELINE SCRIPTS (flat file structure)        │
 │                                                                  │
-│  feature_pipeline.py   → fetch, engineer features, write FG     │
-│  training_pipeline.py  → train 3 models, register               │
-│  inference_pipeline.py → predict next 24/48/72h, write preds    │
+│  feature_pipeline.py   → fetch, engineer features, write FG      │
+│  training_pipeline.py  → train 3 models, register                │
+│  inference_pipeline.py → predict next 24/48/72h, write preds     │
 │  backfill_pipeline.py  → historical Open-Meteo backfill          │
 └────────────────────────────┬─────────────────────────────────────┘
                              │
                              ▼
 ┌──────────────────────────────────────────────────────────────────┐
 │                        HOPSWORKS                                 │
-│  Feature Store (feature groups)  ·  Model Registry (3 models)   │
-│  aqi_model_24h · aqi_model_48h · aqi_model_72h                  │
+│  Feature Store (feature groups)  ·  Model Registry (3 models)    │
+│  aqi_model_24h · aqi_model_48h · aqi_model_72h                   │
 └────────────────────────────┬─────────────────────────────────────┘
                              │
                              ▼
