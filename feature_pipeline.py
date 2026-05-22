@@ -282,8 +282,22 @@ def main() -> None:
         event_time  = "timestamp",
         description = "Karachi AQI — Open-Meteo current + 72h forecast features",
     )
+    latest["hour_of_day"] = latest["hour_of_day"].astype("int64")
+    latest["day_of_week"] = latest["day_of_week"].astype("int64")
+    latest["month"] = latest["month"].astype("int64")
     latest = latest.drop(columns=['hours_since_prev', 'is_gap'], errors='ignore')
-    fg.insert(latest)
+    try:
+        fg.insert(
+            latest,
+            write_options={
+                "start_offline_materialization": False,
+                "wait_for_job": False,
+            },
+        )
+    except Exception as exc:
+        logging.warning("Standard insert path failed, retrying in stream mode: %s", exc)
+        fg.stream = True
+        fg.insert(latest)
     logging.info("Inserted %s row into feature group aqi_features:1", len(latest))
 
 

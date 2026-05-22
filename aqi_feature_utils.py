@@ -91,9 +91,9 @@ def add_engineered_features(df: pd.DataFrame) -> pd.DataFrame:
     data = ensure_datetime_utc(df)
     data = data.sort_values("timestamp").reset_index(drop=True)
 
-    data["hour_of_day"] = data["timestamp"].dt.hour.astype("int32")
-    data["day_of_week"] = data["timestamp"].dt.dayofweek.astype("int32")
-    data["month"] = data["timestamp"].dt.month.astype("int32")
+    data["hour_of_day"] = data["timestamp"].dt.hour.astype("int64")
+    data["day_of_week"] = data["timestamp"].dt.dayofweek.astype("int64")
+    data["month"] = data["timestamp"].dt.month.astype("int64")
 
     data["hour_sin"] = np.sin(2 * np.pi * data["hour_of_day"] / 24)
     data["hour_cos"] = np.cos(2 * np.pi * data["hour_of_day"] / 24)
@@ -154,11 +154,11 @@ def build_training_frame(df: pd.DataFrame, horizon_hours: int) -> pd.DataFrame:
     for column in ["hour_of_day", "day_of_week", "month", "hour_sin", "hour_cos", "dow_sin", "dow_cos"]:
         if column not in data.columns:
             if column == "hour_of_day":
-                data[column] = data["timestamp"].dt.hour.astype("int32")
+                data[column] = data["timestamp"].dt.hour.astype("int64")
             elif column == "day_of_week":
-                data[column] = data["timestamp"].dt.dayofweek.astype("int32")
+                data[column] = data["timestamp"].dt.dayofweek.astype("int64")
             elif column == "month":
-                data[column] = data["timestamp"].dt.month.astype("int32")
+                data[column] = data["timestamp"].dt.month.astype("int64")
             elif column == "hour_sin":
                 data[column] = np.sin(2 * np.pi * data["hour_of_day"] / 24)
             elif column == "hour_cos":
