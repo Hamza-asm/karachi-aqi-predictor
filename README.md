@@ -5,7 +5,7 @@
 <p align="center">
     <img src="https://img.shields.io/badge/Python-3.10%2B-blue" alt="Python" />
     <img src="https://img.shields.io/badge/Streamlit-Cloud-orange?logo=streamlit&logoColor=white" alt="Streamlit" />
-    <img src="https://img.shields.io/badge/Hopsworks-Feature%20Store-007ACC" alt="Hopsworks" />
+    <img src="https://img.shields.io/badge/Google%20Cloud-BigQuery%20%7C%20GCS-4285F4?logo=googlecloud&logoColor=white" alt="Google Cloud" />
     <img src="https://img.shields.io/badge/Open%20Meteo-API-yellow" alt="Open-Meteo" />
     <img src="https://img.shields.io/badge/GitHub%20Actions-CI-blue" alt="GitHub Actions" />
 </p>
@@ -18,12 +18,12 @@
 
 ## Introduction
 
-This repository contains a production-oriented, serverless machine learning system that forecasts Karachi's AQI out to 72 hours. It is intentionally lightweight (four flat pipeline scripts), uses Hopsworks as the central data and model layer, and exposes a Streamlit dashboard for visualization and alerting. The project is built for reproducibility and operations: pipelines are runnable locally, CI is provided through GitHub Actions, and models & features are versioned in Hopsworks.
+This repository contains a production-oriented, serverless machine learning system that forecasts Karachi's AQI out to 72 hours. It is intentionally lightweight (four flat pipeline scripts), uses Google Cloud Platform (BigQuery & GCS) as the central data and model layer, and exposes a Streamlit dashboard for visualization and alerting. The project is built for reproducibility and operations: pipelines are runnable locally, CI is provided through GitHub Actions, and models & features are versioned in GCP.
 
 Key points:
 - Predictive horizon: 24h, 48h, 72h forecasts (separate models per horizon).
 - Data sources: Open-Meteo (weather + pollutant forecasts / history). Historical ground-truth label data was used during earlier experiments — see the PRD for details.
-- Feature store & model registry: Hopsworks (free tier).
+- Feature store & model registry: BigQuery (features) and Google Cloud Storage (models).
 - Dashboard: Streamlit (deployed to Streamlit Cloud in production).
 
 
@@ -58,16 +58,16 @@ Key points:
 ┌──────────────────────────────────────────────────────────────────┐
 │                  4 PIPELINE SCRIPTS (flat file structure)        │
 │                                                                  │
-│  feature_pipeline.py   → fetch, engineer features, write FG      │
-│  training_pipeline.py  → train 3 models, register                │
-│  inference_pipeline.py → predict next 24/48/72h, write preds     │
+│  feature_pipeline.py   → fetch, engineer features, write to BQ   │
+│  training_pipeline.py  → train 3 models, save to GCS             │
+│  inference_pipeline.py → predict next 24/48/72h                  │
 │  backfill_pipeline.py  → historical Open-Meteo backfill          │
 └────────────────────────────┬─────────────────────────────────────┘
                              │
                              ▼
 ┌──────────────────────────────────────────────────────────────────┐
-│                        HOPSWORKS                                 │
-│  Feature Store (feature groups)  ·  Model Registry (3 models)    │
+│                     GOOGLE CLOUD PLATFORM                        │
+│  BigQuery (Feature Store)  ·  Google Cloud Storage (Models)      │
 │  aqi_model_24h · aqi_model_48h · aqi_model_72h                   │
 └────────────────────────────┬─────────────────────────────────────┘
                              │
@@ -86,6 +86,7 @@ Key points:
 - Flat 4-script structure over a `src/` package hierarchy — intentional simplicity, easier to debug
 - Three separate per-horizon models rather than one multi-output model — cleaner experiment tracking
 - Open-Meteo for all features (free, no API key, 7-day forecast + 3-month history)
+- BigQuery & GCS selected over Hopsworks due to increased stability and faster ecosystem integrations
 - Random Forest selected as best model across all horizons after multi-model comparison
 
 
@@ -94,15 +95,15 @@ Key points:
 
 ### Phase 1 — Design & Setup
 
-Started with the goal of building a real, production-like ML system — not just a notebook. Chose a serverless architecture to avoid Docker/Airflow overhead. Mapped out the data sources: Open-Meteo for meteorological and air quality forecast features. Settled on Hopsworks as both the feature store and model registry since it offered a free tier that could handle the project's scale.
+Started with the goal of building a real, production-like ML system — not just a notebook. Chose a serverless architecture to avoid Docker/Airflow overhead. Mapped out the data sources: Open-Meteo for meteorological and air quality forecast features. Settled on Google Cloud Platform (BigQuery and GCS) for data storage and model registry after migrating off Hopsworks to improve system stability.
 
 Initially considered OpenWeatherMap as an additional data source but dropped it due to API activation delays. GitHub Actions was chosen for orchestration over Airflow for the same simplicity-first reason.
 
 ### Phase 2 — Data Pipeline & Feature Engineering
 
-Built the feature pipeline to pull hourly data from Open-Meteo, engineer lag features (1h, 3h, 6h, 12h, 24h), rolling statistics, and cyclical time encodings (sin/cos for hour and day-of-week), then write everything into a Hopsworks feature group.
+Built the feature pipeline to pull hourly data from Open-Meteo, engineer lag features (1h, 3h, 6h, 12h, 24h), rolling statistics, and cyclical time encodings (sin/cos for hour and day-of-week), then write everything into BigQuery.
 
-The backfill pipeline pulled 3 months of Open-Meteo historical data to bootstrap the feature group with enough history to train on.
+The backfill pipeline pulled 3 months of Open-Meteo historical data to bootstrap the feature store with enough history to train on.
 
 ### Phase 3 — The Distribution Shift Crisis (Biggest Setback)
 
@@ -132,7 +133,7 @@ These numbers are honest. Papers reporting R² ≈ 0.99 for "AQI prediction" are
 
 Deployed a Streamlit dashboard with dark theme cards, Plotly charts, a real EDA section, a model comparison tab across all horizons, and SHAP/LIME explainability. Three bugs hit in production:
 
-**Bug 1 — Model cache TTL too short:** Frequent large model re-downloads from Hopsworks degrading performance. Fixed by extending cache TTL to 6 hours.
+**Bug 1 — Model cache TTL too short:** Frequent large model re-downloads degrading performance. Fixed by extending cache TTL to 6 hours.
 
 **Bug 2 — History cache never expiring:** Cache keyed on object reference instead of stable value, so it never refreshed. Fixed by using UTC hour as cache-bust key.
 
