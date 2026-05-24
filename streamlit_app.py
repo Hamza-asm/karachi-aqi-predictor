@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import textwrap
 import warnings
 from dataclasses import dataclass
-import hopsworks
+from google.cloud import bigquery
+from google.cloud import storage
+from google.oauth2 import service_account
 import joblib
 import numpy as np
 import pandas as pd
@@ -14,6 +17,25 @@ from plotly.subplots import make_subplots
 import shap
 import streamlit as st
 from dotenv import load_dotenv
+
+# Setup GCP credentials from environment
+load_dotenv()
+gcp_key = os.getenv("GCP_KEY_JSON")
+if not gcp_key:
+    try:
+        gcp_key = st.secrets.get("GCP_KEY_JSON")
+    except Exception:
+        gcp_key = None
+
+if gcp_key:
+    if not os.path.exists("gcp-key.json"):
+        with open("gcp-key.json", "w") as f:
+            f.write(gcp_key)
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "gcp-key.json"
+
+GCP_PROJECT = os.getenv("GOOGLE_CLOUD_PROJECT", "aqi-predictor-497110")
+GCS_BUCKET = "aqi-predictor-497110-features"
+BQ_TABLE = "aqi-predictor-497110.aqi_features.features"
 
 try:
     from streamlit_autorefresh import st_autorefresh
@@ -432,120 +454,75 @@ class ModelBundle:
 
 
 @st.cache_resource(show_spinner=False)
-def _login() -> hopsworks.project.Project:
-    load_dotenv()
-    host = os.getenv("HOPSWORKS_HOST", "eu-west.cloud.hopsworks.ai")
-    api_key = os.getenv("HOPSWORKS_API_KEY")
-    if not api_key and "HOPSWORKS_API_KEY" in st.secrets:
-        api_key = st.secrets["HOPSWORKS_API_KEY"]
-    if not api_key:
-        raise RuntimeError("HOPSWORKS_API_KEY is missing")
-    return hopsworks.login(host=host, api_key_value=api_key)
+def _get_gcp_clients():
+    bq_client = bigquery.Client(project=GCP_PROJECT)
+    gcs_client = storage.Client(project=GCP_PROJECT)
+    return bq_client, gcs_client
 
-
-def _feature_store_name() -> str:
-    load_dotenv()
-    return os.getenv("HOPSWORKS_FEATURE_STORE_NAME", "aqi_khi_serverless_featurestore")
-
-
-def _latest_model_version(_mr, horizon: int) -> int:
-    """Get the LATEST version number (not the best by RMSE)."""
-    model_name = f"aqi_model_{horizon}h"
-    # Ask the registry for all models and pick the highest version for this name.
-    models = _mr.get_models(model_name)
-    versions: list[int] = []
-    for model in models or []:
-        if getattr(model, "name", None) != model_name:
-            continue
-        version = getattr(model, "version", None)
-        if version is not None:
-            versions.append(int(version))
-    if not versions:
-        raise RuntimeError(f"No versions found for {model_name}")
-    return max(versions)
-
+def _latest_model_version(gcs_client, horizon: int) -> str:
+    bucket = gcs_client.bucket(GCS_BUCKET)
+    blob = bucket.get_blob(f"models/aqi_model_{horizon}h/latest/metadata.json")
+    return blob.updated.isoformat() if blob else "latest"
 
 @st.cache_resource(show_spinner=False)
-def _load_model_bundle(_mr, horizon: int, model_version: int) -> ModelBundle:
-    # model_version is part of the cache key, so a new registry version refreshes the download.
-    model_name = f"aqi_model_{horizon}h"
-    registered_model = _mr.get_model(model_name, version=model_version)
-    model_dir = registered_model.download()
+def _load_model_bundle(_gcs_client, horizon: int, cache_bust: str) -> ModelBundle:
+    bucket = _gcs_client.bucket(GCS_BUCKET)
+    prefix = f"models/aqi_model_{horizon}h/latest"
 
-    metadata_path = os.path.join(model_dir, "metadata.json")
-    if not os.path.exists(metadata_path):
-        raise RuntimeError(f"metadata.json missing for aqi_model_{horizon}h")
+    with tempfile.TemporaryDirectory() as tmp:
+        for filename in ["metadata.json", "model.pkl", "model.keras", "scaler.pkl"]:
+            blob = bucket.blob(f"{prefix}/{filename}")
+            if blob.exists():
+                blob.download_to_filename(os.path.join(tmp, filename))
 
-    with open(metadata_path, "r", encoding="utf-8") as handle:
-        metadata = json.load(handle)
+        metadata_path = os.path.join(tmp, "metadata.json")
+        if not os.path.exists(metadata_path):
+            raise RuntimeError(f"metadata.json missing for aqi_model_{horizon}h")
 
-    model_type    = metadata.get("model_type", "sklearn")
-    feature_cols  = metadata.get("features", feature_columns())
-    lookback      = int(metadata.get("lookback_window", 24))
-    metrics       = metadata.get("metrics", {})
-    all_metrics   = metadata.get("all_model_metrics", {})
+        with open(metadata_path, "r", encoding="utf-8") as handle:
+            metadata = json.load(handle)
 
-    # Conditionally load TF dependencies only if required
-    if model_type == "tensorflow":
-        from tensorflow import keras
-        model  = keras.models.load_model(os.path.join(model_dir, "model.keras"))
-        scaler_path = os.path.join(model_dir, "scaler.pkl")
-        scaler = joblib.load(scaler_path) if os.path.exists(scaler_path) else None
-    else:
-        model  = joblib.load(os.path.join(model_dir, "model.pkl"))
-        scaler = None
+        model_type   = metadata.get("model_type", "sklearn")
+        feature_cols = metadata.get("features", feature_columns())
+        lookback     = int(metadata.get("lookback_window", 24))
+        metrics      = metadata.get("metrics", {})
+        all_metrics  = metadata.get("all_model_metrics", {})
 
-    return ModelBundle(
-        horizon=horizon, model_name=metadata.get("model_name", f"aqi_model_{horizon}h"),
-        model_version=model_version,
-        model_type=model_type, metrics=metrics, model=model, model_dir=model_dir,
-        all_model_metrics=all_metrics, scaler=scaler, lookback_window=lookback,
-        feature_cols=feature_cols,
-    )
+        if model_type == "tensorflow":
+            from tensorflow import keras
+            model  = keras.models.load_model(os.path.join(tmp, "model.keras"))
+            scaler_path = os.path.join(tmp, "scaler.pkl")
+            scaler = joblib.load(scaler_path) if os.path.exists(scaler_path) else None
+        else:
+            model  = joblib.load(os.path.join(tmp, "model.pkl"))
+            scaler = None
 
+        return ModelBundle(
+            horizon=horizon,
+            model_name=metadata.get("model_name", f"aqi_model_{horizon}h"),
+            model_version=cache_bust,
+            model_type=model_type,
+            metrics=metrics,
+            model=model,
+            model_dir=tmp,
+            all_model_metrics=all_metrics,
+            scaler=scaler,
+            lookback_window=lookback,
+            feature_cols=feature_cols,
+        )
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def _load_history(_fs, _cache_bust: str) -> pd.DataFrame:
-    """Load AQI history from the online feature store."""
-    fg = _fs.get_feature_group(name="aqi_features", version=1)
-    online_data = pd.DataFrame()
-
-    try:
-        # Online store gives the absolute latest row
-        online_data = fg.read(online=True)
-    except Exception as e:
-        st.sidebar.warning(f"Note: Online store unavailable ({e}).")
-
-    with st.sidebar.expander("🔍 Data Diagnostics", expanded=False):
-        st.write(f"Raw Online Rows: {len(online_data)}")
-        if not online_data.empty:
-            st.write(f"Latest Online: {pd.to_datetime(online_data['timestamp'], utc=True).max()}")
-
-    if online_data.empty:
-        try:
-            offline_data = fg.read(online=False)
-        except Exception as e:
-            st.sidebar.error(f"Error: Offline store read failed ({e}).")
-            return pd.DataFrame()
-
-        if offline_data.empty:
-            return pd.DataFrame()
-
-        offline_data["timestamp"] = pd.to_datetime(offline_data["timestamp"], utc=True)
-        offline_data = offline_data.sort_values("timestamp").drop_duplicates(subset=["timestamp"], keep="last").reset_index(drop=True)
-        offline_data = offline_data[offline_data["aqi"].notna()].copy()
-        if offline_data.empty:
-            return pd.DataFrame()
-        return prepare_prediction_frame(offline_data)
-
-    online_data["timestamp"] = pd.to_datetime(online_data["timestamp"], utc=True)
-    online_data = online_data.sort_values("timestamp").drop_duplicates(subset=["timestamp"], keep="last").reset_index(drop=True)
-    online_data = online_data[online_data["aqi"].notna()].copy()
-
-    if online_data.empty:
-        return pd.DataFrame()
-
-    return prepare_prediction_frame(online_data)
+def _load_history(_bq_client, _cache_bust: str) -> pd.DataFrame:
+    query = f"""
+        SELECT * FROM `{BQ_TABLE}`
+        ORDER BY timestamp DESC
+        LIMIT 500
+    """
+    df = _bq_client.query(query).to_dataframe()
+    df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
+    df = df.sort_values('timestamp').reset_index(drop=True)
+    df = df[df['aqi'].notna()].copy()
+    return prepare_prediction_frame(df)
 
 
 def _loading_state_html(step: str, percent: int, detail: str) -> str:
@@ -986,7 +963,7 @@ def main() -> None:
     <div class="aqi-header">
         <div>
             <div class="aqi-title">☁️ Karachi AQI Predictor</div>
-            <div class="aqi-subtitle">Real-time forecasting · Open-Meteo data · Hopsworks feature store</div>
+            <div class="aqi-subtitle">Real-time forecasting · Open-Meteo data · BigQuery feature store</div>
         </div>
         <div class="aqi-attribution">Designed &amp; Developed by Hamza Ali Khan</div>
     </div>
@@ -995,7 +972,7 @@ def main() -> None:
     loading_slot = st.empty()
     loading_slot.markdown(
         _loading_state_html(
-            "Connecting to Hopsworks",
+            "Connecting to GCP",
             12,
             "Authenticating and preparing the dashboard",
         ),
@@ -1003,16 +980,14 @@ def main() -> None:
     )
 
     # ── Load data ─────────────────────────────────────────────────────────────
-    with st.spinner("Connecting to Hopsworks…"):
-        project = _login()
-        fs      = project.get_feature_store(name=_feature_store_name())
-        mr      = project.get_model_registry()
+    with st.spinner("Connecting to GCP…"):
+        bq_client, gcs_client = _get_gcp_clients()
 
     loading_slot.markdown(
         _loading_state_html(
-            "Connected to Hopsworks",
+            "Connected to GCP",
             35,
-            "Reading feature store history and model registry",
+            "Reading BigQuery history and model registry",
         ),
         unsafe_allow_html=True,
     )
@@ -1037,7 +1012,7 @@ def main() -> None:
     with st.spinner("Loading feature store history…"):
         # Fix 2: Cache Busting with Current Hour
         current_hour = pd.Timestamp.now(tz="UTC").strftime("%Y-%m-%d-%H")
-        history = _load_history(fs, current_hour)
+        history = _load_history(bq_client, current_hour)
 
     loading_slot.markdown(
         _loading_state_html(
@@ -1059,8 +1034,8 @@ def main() -> None:
 
     for horizon in [24, 48, 72]:
         try:
-            model_version = _latest_model_version(mr, horizon)
-            b = _load_model_bundle(mr, horizon, model_version)
+            model_version = _latest_model_version(gcs_client, horizon)
+            b = _load_model_bundle(gcs_client, horizon, model_version)
             bundles[horizon]     = b
             predictions[horizon] = _predict(b, history)
         except Exception as exc:
@@ -1588,7 +1563,7 @@ def main() -> None:
     st.markdown("""
     <p style="font-size:0.75rem;color:#334155;text-align:center;margin-top:2rem;padding-top:1rem;
     border-top:1px solid #1e2d4a;">
-        Karachi AQI Predictor · Built with Hopsworks · GitHub Actions · Streamlit · By Hamza Ali Khan
+        Karachi AQI Predictor · Built with BigQuery · GitHub Actions · Streamlit · By Hamza Ali Khan
     </p>""", unsafe_allow_html=True)
 
 

@@ -4,10 +4,11 @@ import logging
 import os
 from datetime import datetime, timezone
 
-import hopsworks
 import pandas as pd
 import requests
 from dotenv import load_dotenv
+from google.cloud import bigquery
+from google.oauth2 import service_account
 
 from aqi_feature_utils import build_feature_row_for_insert, safe_float
 
@@ -32,6 +33,8 @@ FEATURE_COLUMNS = [
 
 # Forecast windows to compute: (label, start_hour, end_hour)
 FORECAST_WINDOWS = [("24h", 0, 24), ("48h", 24, 48), ("72h", 48, 72)]
+
+BQ_TABLE = "aqi-predictor-497110.aqi_features.features"
 
 
 # ── AQI conversion ────────────────────────────────────────────────────────────
@@ -208,7 +211,7 @@ def fallback_current(history: pd.DataFrame) -> pd.DataFrame:
     if history is not None and not history.empty:
         latest_history = history.sort_values("timestamp").tail(1).copy().reset_index(drop=True)
         latest_history.loc[:, "timestamp"] = now
-        logging.warning("Open-Meteo unavailable; reusing the latest feature-store row as fallback")
+        logging.warning("Open-Meteo unavailable; reusing the latest BigQuery row as fallback")
         return latest_history
 
     logging.warning("Open-Meteo unavailable and no history exists; creating empty fallback row")
@@ -216,18 +219,64 @@ def fallback_current(history: pd.DataFrame) -> pd.DataFrame:
                           for col in FEATURE_COLUMNS}], columns=FEATURE_COLUMNS)
 
 
-# ── Hopsworks history ─────────────────────────────────────────────────────────
+# ── BigQuery history ─────────────────────────────────────────────────────────
 
-def load_history(feature_store: object) -> pd.DataFrame:
-    """Load existing feature group rows for lag/rolling computation."""
+def _bigquery_client() -> bigquery.Client:
+    project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
+    credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+
+    if credentials_path:
+        credentials = service_account.Credentials.from_service_account_file(credentials_path)
+        return bigquery.Client(project=project_id, credentials=credentials)
+
+    return bigquery.Client(project=project_id)
+
+
+def load_history(client: bigquery.Client) -> pd.DataFrame:
+    """Load existing feature rows for lag/rolling computation."""
     try:
-        fg      = feature_store.get_feature_group(name="aqi_features", version=1)
-        history = fg.read(online=False)
-        if history is None or history.empty:
+        query = f"""
+            SELECT * FROM `{BQ_TABLE}`
+            ORDER BY timestamp DESC
+            LIMIT 50
+        """
+        history_df = client.query(query).to_dataframe()
+        if history_df is None or history_df.empty:
             return pd.DataFrame()
-        return history
-    except Exception:
+        history_df["timestamp"] = pd.to_datetime(history_df["timestamp"], utc=True)
+        return history_df
+    except Exception as exc:
+        logging.warning("BigQuery history load failed: %s", exc)
         return pd.DataFrame()
+
+
+def insert_latest_row(client: bigquery.Client, latest: pd.DataFrame) -> None:
+    latest_timestamp = pd.Timestamp(latest["timestamp"].iloc[0]).isoformat()
+    check_query = f"""
+        SELECT COUNT(*) as cnt
+        FROM `{BQ_TABLE}`
+        WHERE timestamp = '{latest_timestamp}'
+    """
+    result = client.query(check_query).to_dataframe()
+    if result["cnt"][0] > 0:
+        logging.info("Row already exists, skipping insert")
+        return
+
+    latest = latest.drop(
+        columns=["hours_since_prev", "is_gap", "fc_pm25_24h", "fc_pm25_48h", "fc_pm25_72h"],
+        errors="ignore",
+    )
+
+    latest["hour_of_day"] = latest["hour_of_day"].astype("int64")
+    latest["day_of_week"] = latest["day_of_week"].astype("int64")
+    latest["month"] = latest["month"].astype("int64")
+
+    job_config = bigquery.LoadJobConfig(
+        write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
+    )
+    job = client.load_table_from_dataframe(latest, BQ_TABLE, job_config=job_config)
+    job.result()
+    logging.info("Inserted 1 row into BigQuery feature table")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -235,17 +284,8 @@ def load_history(feature_store: object) -> pd.DataFrame:
 def main() -> None:
     load_dotenv()
 
-    host              = os.getenv("HOPSWORKS_HOST", "eu-west.cloud.hopsworks.ai")
-    hopsworks_api_key = os.getenv("HOPSWORKS_API_KEY")
-
-    if not hopsworks_api_key:
-        raise RuntimeError("HOPSWORKS_API_KEY is missing")
-
-    # ── Step 1: connect Hopsworks ─────────────────────────────────────────────
-    project = hopsworks.login(host=host, api_key_value=hopsworks_api_key)
-    feature_store_name = os.getenv("HOPSWORKS_FEATURE_STORE_NAME", "aqi_khi_serverless_featurestore")
-    fs      = project.get_feature_store(name=feature_store_name)
-    history = load_history(fs)
+    client = _bigquery_client()
+    history = load_history(client)
 
     # ── Step 2: fetch current readings from Open-Meteo ────────────────────────
     try:
@@ -274,31 +314,8 @@ def main() -> None:
     logging.info("Feature row columns : %s", latest.columns.tolist())
     logging.info("Feature row preview : %s", latest.to_dict(orient="records")[0])
 
-    # ── Step 5: insert into feature group ─────────────────────────────────────
-    fg = fs.get_or_create_feature_group(
-        name        = "aqi_features",
-        version     = 1,
-        primary_key = ["timestamp"],
-        event_time  = "timestamp",
-        description = "Karachi AQI — Open-Meteo current + 72h forecast features",
-    )
-    latest["hour_of_day"] = latest["hour_of_day"].astype("int64")
-    latest["day_of_week"] = latest["day_of_week"].astype("int64")
-    latest["month"] = latest["month"].astype("int64")
-    latest = latest.drop(columns=['hours_since_prev', 'is_gap'], errors='ignore')
-    try:
-        fg.insert(
-            latest,
-            write_options={
-                "start_offline_materialization": False,
-                "wait_for_job": False,
-            },
-        )
-    except Exception as exc:
-        logging.warning("Standard insert path failed, retrying in stream mode: %s", exc)
-        fg.stream = True
-        fg.insert(latest)
-    logging.info("Inserted %s row into feature group aqi_features:1", len(latest))
+    # ── Step 5: insert into BigQuery ─────────────────────────────────────────
+    insert_latest_row(client, latest)
 
 
 if __name__ == "__main__":

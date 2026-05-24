@@ -11,7 +11,8 @@ os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
 os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
 warnings.filterwarnings("ignore", message=r".*tf\.reset_default_graph.*")
 
-import hopsworks
+from google.cloud import bigquery
+from google.cloud import storage
 import joblib
 import numpy as np
 import pandas as pd
@@ -30,6 +31,12 @@ from aqi_feature_utils import (
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+BQ_TABLE = "aqi-predictor-497110.aqi_features.features"
+GCS_BUCKET = "aqi-predictor-497110-features"
+
+bq_client: bigquery.Client | None = None
+gcs_client: storage.Client | None = None
 
 LOOKBACK_WINDOW      = 24
 DEFAULT_TRAIN_START  = (pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=92)).date().isoformat()
@@ -94,6 +101,52 @@ class ModelResult:
     artifact:        object
     all_metrics:     dict        # metrics for ALL candidates, shown on dashboard
     scaler:          StandardScaler | None = None
+
+
+def save_model_to_registry(
+    project_id,
+    gcs_bucket,
+    horizon_hours,
+    best_name,
+    best_model,
+    best_metrics,
+    best_type,
+    best_scaler,
+    feat_cols,
+    all_metrics,
+):
+    global gcs_client
+
+    with tempfile.TemporaryDirectory() as tmp:
+        metadata = {
+            "model_name": best_name,
+            "model_type": best_type,
+            "horizon_hours": horizon_hours,
+            "features": feat_cols,
+            "metrics": best_metrics,
+            "all_model_metrics": all_metrics,
+        }
+        with open(os.path.join(tmp, "metadata.json"), "w") as f:
+            json.dump(metadata, f, indent=2)
+
+        if best_type == "tensorflow":
+            best_model.save(os.path.join(tmp, "model.keras"))
+            if best_scaler:
+                joblib.dump(best_scaler, os.path.join(tmp, "scaler.pkl"))
+        else:
+            joblib.dump(best_model, os.path.join(tmp, "model.pkl"))
+
+        bucket = gcs_client.bucket(gcs_bucket)
+        gcs_prefix = f"models/aqi_model_{horizon_hours}h/latest"
+
+        for filename in os.listdir(tmp):
+            blob = bucket.blob(f"{gcs_prefix}/{filename}")
+            blob.upload_from_filename(os.path.join(tmp, filename))
+            logging.info("Uploaded %s to GCS", filename)
+        logging.info(
+            "Model aqi_model_%sh saved to GCS: gs://%s/%s",
+            horizon_hours, gcs_bucket, gcs_prefix,
+        )
 
 
 # Helpers
@@ -239,7 +292,7 @@ def train_tabular_models(
 
 
 # Per-horizon trainer
-def train_for_horizon(project: object, df: pd.DataFrame, horizon_hours: int) -> ModelResult:
+def train_for_horizon(df: pd.DataFrame, horizon_hours: int) -> ModelResult:
     target_col  = target_column(horizon_hours)
     model_frame = build_training_frame(df, horizon_hours)
     feat_cols   = get_horizon_feature_cols(model_frame, horizon_hours)
@@ -315,38 +368,18 @@ def train_for_horizon(project: object, df: pd.DataFrame, horizon_hours: int) -> 
         name: vals[1] for name, vals in all_candidates.items()
     }
 
-    # Save to Hopsworks Model Registry
-    with tempfile.TemporaryDirectory() as tmp:
-        metadata = {
-            "model_name":        best_name,
-            "model_type":        best_type,
-            "horizon_hours":     horizon_hours,
-            "lookback_window":   LOOKBACK_WINDOW,
-            "features":          feat_cols,
-            "metrics":           best_metrics,
-            "all_model_metrics": all_metrics,
-        }
-        with open(os.path.join(tmp, "metadata.json"), "w") as f:
-            json.dump(metadata, f, indent=2)
-
-        if best_type == "tensorflow":
-            best_model.save(os.path.join(tmp, "model.keras"))
-            if best_scaler:
-                joblib.dump(best_scaler, os.path.join(tmp, "scaler.pkl"))
-            reg = project.get_model_registry()
-            reg.tensorflow.create_model(
-                name=f"aqi_model_{horizon_hours}h",
-                metrics=best_metrics,
-                description=f"Best {horizon_hours}h model: {best_name}",
-            ).save(tmp)
-        else:
-            joblib.dump(best_model, os.path.join(tmp, "model.pkl"))
-            reg = project.get_model_registry()
-            reg.sklearn.create_model(
-                name=f"aqi_model_{horizon_hours}h",
-                metrics=best_metrics,
-                description=f"Best {horizon_hours}h model: {best_name}",
-            ).save(tmp)
+    save_model_to_registry(
+        project_id=os.getenv("GOOGLE_CLOUD_PROJECT"),
+        gcs_bucket=GCS_BUCKET,
+        horizon_hours=horizon_hours,
+        best_name=best_name,
+        best_model=best_model,
+        best_metrics=best_metrics,
+        best_type=best_type,
+        best_scaler=best_scaler,
+        feat_cols=feat_cols,
+        all_metrics=all_metrics,
+    )
 
     return ModelResult(
         name=best_name, model_type=best_type,
@@ -359,22 +392,21 @@ def train_for_horizon(project: object, df: pd.DataFrame, horizon_hours: int) -> 
 def main() -> None:
     load_dotenv()
 
-    host             = os.getenv("HOPSWORKS_HOST", "eu-west.cloud.hopsworks.ai")
-    api_key          = os.getenv("HOPSWORKS_API_KEY")
     # Default to the project's DEFAULT_TRAIN_START (92 days) unless overridden.
     train_start_date = os.getenv("TRAIN_START_DATE", DEFAULT_TRAIN_START)
 
-    if not api_key:
-        raise RuntimeError("HOPSWORKS_API_KEY is missing")
-
-    project = hopsworks.login(host=host, api_key_value=api_key)
-    feature_store_name = os.getenv("HOPSWORKS_FEATURE_STORE_NAME", "aqi_khi_serverless_featurestore")
-    fs      = project.get_feature_store(name=feature_store_name)
+    global bq_client, gcs_client
+    bq_client = bigquery.Client(project=os.getenv("GOOGLE_CLOUD_PROJECT"))
+    gcs_client = storage.Client(project=os.getenv("GOOGLE_CLOUD_PROJECT"))
 
     # Load and filter data
-    fg  = fs.get_feature_group(name="aqi_features", version=1)
-    raw = fg.read(online=False)
-    logging.info("Raw data: %s rows, %s columns", *raw.shape)
+    query = f"""
+        SELECT * FROM `{BQ_TABLE}`
+        ORDER BY timestamp ASC
+    """
+    raw = bq_client.query(query).to_dataframe()
+    raw["timestamp"] = pd.to_datetime(raw["timestamp"], utc=True)
+    logging.info("Read %s rows from BigQuery", len(raw))
 
     raw["timestamp"] = pd.to_datetime(raw["timestamp"], utc=True)
     raw = raw.sort_values("timestamp").reset_index(drop=True)
@@ -403,7 +435,7 @@ def main() -> None:
     for horizon in [24, 48, 72]:
         logging.info("=" * 50)
         logging.info("Training horizon: %sh", horizon)
-        result = train_for_horizon(project, filtered, horizon)
+        result = train_for_horizon(filtered, horizon)
         logging.info(
             "Registered aqi_model_%sh — best: %s  RMSE: %.4f  R²: %.4f",
             horizon, result.name, result.metrics["rmse"], result.metrics["r2"],

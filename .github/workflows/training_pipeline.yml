@@ -18,8 +18,12 @@ jobs:
           python-version: '3.10'
       - name: Install dependencies
         run: pip install -r requirements.txt
+      - name: Setup GCP credentials
+        run: |
+          echo '${{ secrets.GCP_KEY_JSON }}' > gcp-key.json
       - name: Run training pipeline
         env:
-          HOPSWORKS_API_KEY: ${{ secrets.HOPSWORKS_API_KEY }}
-          HOPSWORKS_HOST: eu-west.cloud.hopsworks.ai
+          GOOGLE_CLOUD_PROJECT: aqi-predictor-497110
+          GOOGLE_CLOUD_REGION: us-central1
+          GOOGLE_APPLICATION_CREDENTIALS: gcp-key.json
         run: python training_pipeline.py
