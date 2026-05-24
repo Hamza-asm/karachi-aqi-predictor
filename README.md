@@ -10,7 +10,7 @@
     <img src="https://img.shields.io/badge/GitHub%20Actions-CI-blue" alt="GitHub Actions" />
 </p>
 
-> **Author:** Hamza Ali | **Role:** Data Science Intern
+> **Author:** Hamza Ali Khan | **Role:** Data Science Intern
 >
 > **Goal:** End-to-end, fully serverless ML system that forecasts Karachi's Air Quality Index (AQI) at 24h, 48h, and 72h horizons.
 
