@@ -306,7 +306,7 @@ def main() -> None:
         logging.warning("Open-Meteo forecast failed, using NaN placeholders: %s", exc)
         for label in ["24h", "48h", "72h"]:
             for col in ["fc_pm25", "fc_co", "fc_no2", "fc_so2", "fc_o3", "fc_dust", "fc_uvi"]:
-                latest[f"{col}_{label}"] = float("nan")
+                latest.loc[:, f"{col}_{label}"] = float("nan")
 
     # ── Step 4: compute lag/rolling features ──────────────────────────────────
     latest = build_feature_row_for_insert(history, latest)

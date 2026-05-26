@@ -840,6 +840,9 @@ def _render_model_explainability(bundle: ModelBundle, history: pd.DataFrame, sel
     shap_df = _shap_importance(bundle, history)
     lime_df = _lime_importance(bundle, history)
 
+    # Filter out features with NaN weights
+    lime_df = lime_df.dropna(subset=["weight"])
+
     left, right = st.columns(2)
     with left:
         st.markdown("**SHAP**")
