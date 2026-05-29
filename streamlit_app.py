@@ -1083,6 +1083,13 @@ def main() -> None:
         </div>""", unsafe_allow_html=True)
 
     # ── KPI strip ─────────────────────────────────────────────────────────────
+    try:
+        total_training_rows = bq_client.query(
+            f"SELECT COUNT(*) as cnt FROM `{BQ_TABLE}`"
+        ).to_dataframe()['cnt'][0]
+    except Exception:
+        total_training_rows = len(history)
+        
     st.markdown(f"""
     <div class="kpi-strip">
         <div class="kpi-card">
@@ -1100,7 +1107,7 @@ def main() -> None:
         </div>
         <div class="kpi-card">
             <div class="kpi-label">Training rows</div>
-            <div class="kpi-value">{len(history):,}</div>
+            <div class="kpi-value">{total_training_rows:,}</div>
             <div class="kpi-sub">Clean Open-Meteo-only labels</div>
         </div>
         <div class="kpi-card">
@@ -1222,7 +1229,12 @@ def main() -> None:
         aqi_median = eda_df["aqi"].median()
         date_min   = eda_df["timestamp"].min().strftime("%b %d, %Y")
         date_max   = eda_df["timestamp"].max().strftime("%b %d, %Y")
-        total_rows = len(eda_df)
+        try:
+            total_rows = bq_client.query(
+                f"SELECT COUNT(*) as cnt FROM `{BQ_TABLE}`"
+            ).to_dataframe()['cnt'][0]
+        except Exception:
+            total_rows = len(eda_df)
         total_cols = len(eda_df.columns)
         good_pct   = (eda_df["aqi"] <= 50).mean() * 100
         moderate_pct = ((eda_df["aqi"] > 50) & (eda_df["aqi"] <= 100)).mean() * 100
