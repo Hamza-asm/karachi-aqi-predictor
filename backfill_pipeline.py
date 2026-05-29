@@ -188,6 +188,7 @@ def build_backfill_dataset(
             data[f"{col}_{horizon}"] = float("nan")
 
     if add_forecast:
+        # Step 4: Try to overlay real future forecasts onto the recent portion of our dataset
         try:
             forecast_df = _fetch_forecast_air_quality(lat, lon)
             data = _add_forecast_windows(data, forecast_df)
@@ -196,7 +197,7 @@ def build_backfill_dataset(
             logging.warning("Forecast fetch failed, will use shifted backfill only: %s", exc)
 
     # ── Backfill historical forecasts by shifting actuals ─────────────────────
-    # For rows where forecast windows are NaN (historical data), simulate them
+    # Step 5: For rows where forecast windows are NaN (historical data), simulate them
     # by shifting the actual observed values. This is a reasonable approximation
     # since tomorrow's AQI closely follows today's pattern.
     logging.info("Filling missing forecast windows with shifted actuals...")
@@ -248,6 +249,7 @@ def main() -> None:
     if not hopsworks_api_key:
         raise RuntimeError("HOPSWORKS_API_KEY is missing")
 
+    # Step 6: Trigger the actual data generation pipeline spanning the provided date range
     backfill_df = build_backfill_dataset(
         start_date   = args.start_date,
         end_date     = args.end_date,
@@ -260,6 +262,7 @@ def main() -> None:
     logging.info("Date range: %s → %s",
                  backfill_df["timestamp"].min(), backfill_df["timestamp"].max())
 
+    # Step 7: Push the fully backfilled records to the Hopsworks feature group
     project = hopsworks.login(host=host, api_key_value=hopsworks_api_key)
     fs      = project.get_feature_store()
     fg      = fs.get_or_create_feature_group(
@@ -270,7 +273,7 @@ def main() -> None:
         description = "Hourly AQI features for Karachi — Open-Meteo pollutants + forecast windows",
     )
 
-    # Filter out timestamps already in the feature store to avoid duplicates
+    # Step 8: Read previously ingested timestamps from the online store to avoid duplicates
     try:
         existing = fg.read(online=False)
         if existing is not None and not existing.empty:
@@ -287,6 +290,7 @@ def main() -> None:
         logging.info("No new rows to insert — feature store is already up to date.")
         return
 
+    # Step 9: Finally, perform the data insertion into Hopsworks
     fg.insert(backfill_df)
     logging.info(
         "Backfill completed. Inserted %s rows from %s to %s",

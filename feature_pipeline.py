@@ -282,19 +282,23 @@ def insert_latest_row(client: bigquery.Client, latest: pd.DataFrame) -> None:
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    # ── Step 1: Initialize clients and load historical data ───────────────────
+    # We initialize the BigQuery client and load recent rows to compute rolling/lag features.
     load_dotenv()
 
     client = _bigquery_client()
     history = load_history(client)
 
-    # ── Step 2: fetch current readings from Open-Meteo ────────────────────────
+    # ── Step 2: Fetch current readings from Open-Meteo ────────────────────────
+    # Try fetching the latest air quality data and compute the AQI.
     try:
         latest = fetch_openmeteo_current()
     except Exception as exc:
         logging.warning("Open-Meteo current fetch failed, using fallback: %s", exc)
         latest = fallback_current(history)
 
-    # ── Step 3: fetch forecast and compute window features ────────────────────
+    # ── Step 3: Fetch forecast and compute window features ────────────────────
+    # Fetch 72-hour forecast and aggregate it into specific time windows (24h, 48h, 72h).
     try:
         forecast_df       = fetch_openmeteo_forecast()
         current_ts        = latest["timestamp"].iloc[0]
@@ -308,13 +312,15 @@ def main() -> None:
             for col in ["fc_pm25", "fc_co", "fc_no2", "fc_so2", "fc_o3", "fc_dust", "fc_uvi"]:
                 latest.loc[:, f"{col}_{label}"] = float("nan")
 
-    # ── Step 4: compute lag/rolling features ──────────────────────────────────
+    # ── Step 4: Compute lag/rolling features ──────────────────────────────────
+    # Combine the new reading with historical data to generate time-based features.
     latest = build_feature_row_for_insert(history, latest)
 
     logging.info("Feature row columns : %s", latest.columns.tolist())
     logging.info("Feature row preview : %s", latest.to_dict(orient="records")[0])
 
-    # ── Step 5: insert into BigQuery ─────────────────────────────────────────
+    # ── Step 5: Insert into BigQuery ─────────────────────────────────────────
+    # Append the fully generated feature row back into the database.
     insert_latest_row(client, latest)
 
 

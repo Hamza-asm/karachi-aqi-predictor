@@ -397,7 +397,8 @@ def main() -> None:
     bq_client = bigquery.Client(project=os.getenv("GOOGLE_CLOUD_PROJECT"))
     gcs_client = storage.Client(project=os.getenv("GOOGLE_CLOUD_PROJECT"))
 
-    # Load and filter data
+    # ── Step 1: Load and filter data ──────────────────────────────────────────
+    # Fetch historical data from BigQuery for training the models.
     query = f"""
         SELECT * FROM `{BQ_TABLE}`
         ORDER BY timestamp ASC
@@ -409,7 +410,8 @@ def main() -> None:
     raw["timestamp"] = pd.to_datetime(raw["timestamp"], utc=True)
     raw = raw.sort_values("timestamp").reset_index(drop=True)
 
-    # Keep only real AQI rows (Open-Meteo source) (aqi not null) after start date
+    # ── Step 2: Clean the dataset ─────────────────────────────────────────────
+    # Keep only real AQI rows (from Open-Meteo source) where 'aqi' is not null after the train start date.
     filtered = raw[
         (raw["timestamp"] >= pd.Timestamp(train_start_date, tz="UTC")) &
         (raw["aqi"].notna())
@@ -423,13 +425,14 @@ def main() -> None:
                  filtered["timestamp"].min().date(),
                  filtered["timestamp"].max().date())
 
-    # Log forecast feature coverage
+    # Log forecast feature coverage for debugging/diagnostic purposes
     fc_cols_present = [c for c in FORECAST_FEATURE_COLS if c in filtered.columns]
     fc_non_null     = filtered[fc_cols_present].notna().any(axis=1).sum() if fc_cols_present else 0
     logging.info("Forecast feature columns present: %s", len(fc_cols_present))
     logging.info("Rows with at least one forecast feature: %s / %s", fc_non_null, len(filtered))
 
-    # Train all horizons
+    # ── Step 3: Train models for all horizons ─────────────────────────────────
+    # Iterate over the different prediction horizons and train separate models for each.
     for horizon in [24, 48, 72]:
         logging.info("=" * 50)
         logging.info("Training horizon: %sh", horizon)

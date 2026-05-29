@@ -197,18 +197,18 @@ GitHub Actions configured for scheduled pipeline runs. Kept disabled during acti
 
 
 
-## Final Model Metrics (v21)
+## Final Model Metrics
 
 | Horizon | Model | RMSE | R² |
 |---------|-------|------|-----|
-| 24h | Random Forest | 11.02 | 0.13 |
-| 48h | Random Forest | 10.47 | 0.22 |
-| 72h | Random Forest | 10.93 | 0.16 |
+| 24h | Random Forest | 9.818 | 0.2997 |
+| 48h | Random Forest | 9.588 | 0.3297 |
+| 72h | Random Forest | 10.308 | 0.2336 |
 
 
-
->*Dataset: 2026-01-30 → 2026-05-20 (92-day rolling window) 
-| Clean rows after gap filtering: ~1700 per horizon | Features: 29-34 per horizon (lags, rolling stats, cyclical encodings, forecast signals) | Models: Random Forest | Registry: Hopsworks v21*
+> *Dataset: 2026-01-30 → 2026-05-24 (92-day rolling window)
+>
+>Clean rows after gap filtering: ~1700 per horizon | Features: 29-34 per horizon | Models: Random Forest | Registry: GCS*
 
 ## Dependencies & Run (local)
 
@@ -232,19 +232,22 @@ pip install -r requirements.txt
 
 ```powershell
 copy .env.example .env
-# Edit .env and populate HOPSWORKS_API_KEY and any other needed keys
+# Edit .env and populate GCP credentials
+# GOOGLE_CLOUD_PROJECT=aqi-predictor-497110
+# GOOGLE_CLOUD_REGION=us-central1
+# GOOGLE_APPLICATION_CREDENTIALS=gcp-key.json
 ```
 
 4. Run pipelines locally (examples):
 
 ```powershell
-# Feature pipeline (fetch + write features to Hopsworks)
+# Feature pipeline (fetch + write features to BigQuery)
 python feature_pipeline.py
 
 # Backfill (one-time historical run)
 python backfill_pipeline.py --start 2024-11-01 --end 2025-03-01
 
-# Training pipeline (train + register model)
+# Training pipeline (train + save models to GCS)
 python training_pipeline.py
 ```
 
@@ -256,4 +259,4 @@ streamlit run streamlit_app.py
 
 Notes:
 - CI (GitHub Actions) runs the same scripts in a cloud environment — make sure secrets are in GitHub Secrets.
-- If you use Hopsworks, set `HOPSWORKS_API_KEY` in `.env` (local) and in GitHub Secrets (CI).
+- Replace with: "Set GCP credentials in .env (local) and GitHub Secrets (CI)"

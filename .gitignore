@@ -218,3 +218,4 @@ localdata.py
 fix_materialization.py
 backup_features.csv
 gcp-key.json
+DailyCheck.ipynb
