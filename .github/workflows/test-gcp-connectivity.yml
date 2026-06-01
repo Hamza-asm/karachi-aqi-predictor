@@ -1,0 +1,12 @@
+name: Test GCP Connectivity Canary
+on: workflow_dispatch # Allows manual execution from the GitHub Actions UI
+
+jobs:
+  check-network:
+    runs-on: ubuntu-latest # Low-cost Linux runner
+    steps:
+      - name: Test BigQuery API Endpoint Availability
+        run: curl -I -m 10 https://bigquery.googleapis.com/generate_204
+
+      - name: Test GCS API Endpoint Availability
+        run: curl -I -m 10 https://storage.googleapis.com/generate_204

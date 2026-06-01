@@ -139,7 +139,7 @@ def save_model_to_registry(
 
         for filename in os.listdir(tmp):
             blob = bucket.blob(f"{gcs_prefix}/{filename}")
-            blob.upload_from_filename(os.path.join(tmp, filename))
+            blob.upload_from_filename(os.path.join(tmp, filename), timeout=300)
             logging.info("Uploaded %s to GCS", filename)
         logging.info(
             "Model aqi_model_%sh saved to GCS: gs://%s/%s",

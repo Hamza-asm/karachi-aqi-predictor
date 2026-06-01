@@ -275,7 +275,7 @@ def insert_latest_row(client: bigquery.Client, latest: pd.DataFrame) -> None:
         write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
     )
     job = client.load_table_from_dataframe(latest, BQ_TABLE, job_config=job_config)
-    job.result()
+    job.result(timeout=120)
     logging.info("Inserted 1 row into BigQuery feature table")
 
 
