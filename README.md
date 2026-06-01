@@ -34,17 +34,21 @@ Key points:
     <p><em>Forecast overview: 3-day AQI predictions, current AQI badge, and model comparison controls.</em></p>
 </div>
 
+---
+
 <div align="center">
     <img src="Images/ModelInsights.png" alt="Model insights" width="800"/>
     <p><em>Model insights: SHAP summary and top feature importances used to explain predictions.</em></p>
 </div>
+
+---
 
 <div align="center">
     <img src="Images/EDA.png" alt="EDA view" width="800"/>
     <p><em>Exploratory data analysis: historical AQI trends and pollutant correlation matrices.</em></p>
 </div>
 
-
+---
 
 ## Architecture
 
