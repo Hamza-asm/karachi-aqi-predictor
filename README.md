@@ -37,15 +37,17 @@ Key points:
 ---
 
 <div align="center">
-    <img src="Images/ModelInsights.png" alt="Model insights" width="800"/>
-    <p><em>Model insights: SHAP summary and top feature importances used to explain predictions.</em></p>
+    <img src="Images/ModelInsights.png" alt="Model comparison" width="800"/>
+    <p><em>Model comparison: Evaluating candidate models using metrics like RMSE, MAE, and R².</em></p>
 </div>
 
 ---
 
 <div align="center">
     <img src="Images/EDA.png" alt="EDA view" width="800"/>
-    <p><em>Exploratory data analysis: historical AQI trends and pollutant correlation matrices.</em></p>
+    <img src="Images/Shap.png" alt="Shap view" width="800"/>
+    <p><em>Exploratory data analysis & Model insights: Historical AQI trends, dataset overview, and SHAP & LIME feature contributions.</em></p>
+
 </div>
 
 ---
