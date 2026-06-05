@@ -14,7 +14,7 @@
 >
 > **Goal:** End-to-end, fully serverless ML system that forecasts Karachi's Air Quality Index (AQI) at 24h, 48h, and 72h horizons.
 
-
+🚀 **Live Demo:** [Karachi AQI Predictor Dashboard](https://karachi-aqi-predictor-yqopnupbu9qh53v3a3wr5v.streamlit.app/)
 
 ## Introduction
 
